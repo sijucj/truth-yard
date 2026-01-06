@@ -19,12 +19,11 @@ where databases are the unit of deployment rather than code bundles.
 How it works in practice:
 
 You point `db-yard` at one or more directories. It recursively watches for known
-database patterns such as *.rssd.db and *.sqlpage.db. Each matching database
-file triggers a spawned process bound to a local host and a free port. A JSON
-manifest is written for each running instance, describing its PID, port,
-command, and metadata. File modifications refresh metadata without restarting
-processes. File deletion cleanly terminates the associated process and removes
-its manifest.
+database patterns such as `*.db`. Each matching databasefile triggers a spawned
+process bound to a local host and a free port. A JSON manifest is written for
+each running instance, describing its PID, port, command, and metadata. File
+modifications refresh metadata without restarting processes. File deletion
+cleanly terminates the associated process and removes its manifest.
 
 `db-yard` treats the spawned-state directory as an append-only operational
 ledger. Other tools can observe this directory to build reverse proxies,
@@ -32,9 +31,11 @@ dashboards, routing tables, or orchestration layers without needing shared
 memory or APIs.
 
 The project deliberately avoids being a platform or framework. It does not proxy
-HTTP traffic, manage TLS, restart processes on data changes, or impose opinions
-about site structure. It focuses narrowly on lifecycle management driven by the
-presence or absence of files.
+HTTP traffic for production scale but does include a basic proxy testing utility
+and NGINX and Traefik proxy config generators. It does not manage TLS, restart
+processes on data changes, or impose opinions about site structure. It focuses
+narrowly on lifecycle management driven by the presence or absence of SQLite
+database files.
 
 An optional admin HTTP server can be enabled to expose runtime state and, when
 explicitly configured, execute ad-hoc SQL against known databases for inspection
@@ -67,7 +68,11 @@ bin/yard.ts completions
 ## Core Concepts
 
 - **Watch globs** You tell `yard.ts` what to watch using glob patterns, not
-  directories. Example: `./cargo.d/**/*.db`
+  directories. Example: `./cargo.d/**/*.db`. When a SQLite database which
+  contains `uniform_resource` table is found, it's assumed to be run using
+  `surveilr web-ui -d my.db` and if `uniform_resource` table is not found but
+  `sqlpage_files` table is found, then it directly uses `sqlpage` binary to
+  start the app.
 
 - **Session directories** Each run creates a new session directory under
   `spawned-state-path`:

@@ -4,7 +4,7 @@ import type {
   OwnerIdentity,
   Running,
   SpawnedCtxSnapshot,
-  SpawnedRecord,
+  SpawnedProcess,
   SpawnKind,
 } from "./governance.ts";
 
@@ -29,19 +29,19 @@ import {
   writeSpawnedRecord,
 } from "./fs.ts";
 
+import { makeDefaultDrivers } from "./spawnable.ts";
+import {
+  readDbYardConfig,
+  runSqliteQueryViaCli,
+  tableExists,
+} from "./sqlite.ts";
+import { vlog } from "./text-ui.ts";
 import {
   compileGlobMatchers,
   deriveWatchDirsFromGlobs,
   expandAll,
   matchesAny,
 } from "./watch.ts";
-import {
-  readDbYardConfig,
-  runSqliteQueryViaCli,
-  tableExists,
-} from "./sqlite.ts";
-import { makeDefaultDrivers } from "./spawnable.ts";
-import { vlog } from "./text-ui.ts";
 
 export type Orchestrator = {
   runningByDb: Map<string, Running>;
@@ -199,7 +199,7 @@ async function chooseDriver(args: {
   return undefined;
 }
 
-function dbChanged(rec: SpawnedRecord, st: Deno.FileInfo): boolean {
+function dbChanged(rec: SpawnedProcess, st: Deno.FileInfo): boolean {
   const size = st.size;
   const mtime = st.mtime?.getTime() ?? 0;
   return size !== rec.fileSize || mtime !== rec.fileMtimeMs;
@@ -351,7 +351,7 @@ export async function startOrchestrator(
   });
 
   async function refreshRecordIfChanged(
-    rec: SpawnedRecord,
+    rec: SpawnedProcess,
     counters: ChangeCounters,
   ) {
     const st = await fileStatSafe(rec.dbPath);
@@ -522,7 +522,7 @@ export async function startOrchestrator(
       return;
     }
 
-    const rec: SpawnedRecord = {
+    const rec: SpawnedProcess = {
       version: 1,
       kind: plan.kind,
       id,

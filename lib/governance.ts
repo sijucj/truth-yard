@@ -22,7 +22,7 @@ export type SpawnedCtxSnapshot = {
   note?: string;
 };
 
-export type SpawnedRecord = {
+export type SpawnedProcess = {
   version: 1;
   kind: SpawnKind;
 
@@ -66,7 +66,7 @@ export type SpawnedRecord = {
 };
 
 export type Running = {
-  record: SpawnedRecord;
+  record: SpawnedProcess;
 };
 
 export type VerboseKind =

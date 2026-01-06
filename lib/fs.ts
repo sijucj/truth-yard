@@ -1,6 +1,6 @@
 // lib/fs.ts
 import { dirname as stdDirname } from "@std/path/dirname";
-import type { SpawnedRecord } from "./governance.ts";
+import type { SpawnedProcess } from "./governance.ts";
 
 const text = new TextDecoder();
 
@@ -139,12 +139,12 @@ export async function writeSpawnedPidsFile(
 
 export async function readSpawnedRecord(
   path: string,
-): Promise<SpawnedRecord | undefined> {
+): Promise<SpawnedProcess | undefined> {
   try {
     const raw = await Deno.readTextFile(path);
     const obj = JSON.parse(raw);
     if (!obj || obj.version !== 1) return undefined;
-    return obj as SpawnedRecord;
+    return obj as SpawnedProcess;
   } catch {
     return undefined;
   }
@@ -152,7 +152,7 @@ export async function readSpawnedRecord(
 
 export async function writeSpawnedRecord(
   path: string,
-  rec: SpawnedRecord,
+  rec: SpawnedProcess,
 ): Promise<void> {
   const tmp = `${path}.tmp`;
   await Deno.writeTextFile(tmp, JSON.stringify(rec, null, 2));
@@ -287,4 +287,54 @@ export function defaultRelativeInstanceId(relOrAbs: string): string {
 
 export function dirname(path: string): string {
   return normalizeSlash(stdDirname(path));
+}
+
+/**
+ * Scan a spawned-state root directory, read all v1 SpawnedRecord JSON files,
+ * and return only those whose PID is still alive.
+ */
+export async function liveSpawnedRecords(
+  root: string,
+): Promise<SpawnedProcess[]> {
+  const out: SpawnedProcess[] = [];
+  const rootN = normalizeSlash(root);
+
+  async function walk(dir: string) {
+    let it: AsyncIterable<Deno.DirEntry>;
+    try {
+      it = Deno.readDir(dir);
+    } catch {
+      return;
+    }
+
+    for await (const e of it) {
+      const p = normalizeSlash(`${dir}/${e.name}`);
+
+      if (e.isDirectory) {
+        await walk(p);
+        continue;
+      }
+
+      if (!e.isFile || !p.endsWith(".json")) continue;
+
+      let rec: SpawnedProcess | undefined;
+      try {
+        const raw = await Deno.readTextFile(p);
+        const obj = JSON.parse(raw);
+        if (obj && obj.version === 1) rec = obj as SpawnedProcess;
+      } catch {
+        rec = undefined;
+      }
+
+      if (!rec?.pid || !rec.id) continue;
+      if (!isPidAlive(rec.pid)) continue;
+
+      out.push(rec);
+    }
+  }
+
+  await walk(rootN);
+
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
 }
