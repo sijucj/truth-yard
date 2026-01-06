@@ -1,188 +1,84 @@
-import { expandGlob } from "@std/fs";
-import { globToRegExp } from "@std/path";
-import { dirname } from "./governance.ts";
-
-import {
-  buildSqlpageDatabaseUrl,
-  computeRelPath,
-  defaultRelativeInstanceId,
-  ensureDir,
-  fileStatSafe,
-  fnv1a32Hex,
-  isPidAlive,
-  loadOrCreateOwnerToken,
-  normalizePath,
-  nowMs,
-  pickFreePort,
-  readDbYardConfig,
-  runSqliteQueryViaCli,
-  safeBaseName,
-  vlog,
-  writeSpawnedPidsFile,
-} from "./governance.ts";
-
+// lib/orchestrate.ts
 import type {
+  OrchestratorConfig,
   OwnerIdentity,
   Running,
   SpawnedCtxSnapshot,
   SpawnedRecord,
   SpawnKind,
-  SqlpageEnv,
 } from "./governance.ts";
 
-export type SpawnPlan = {
-  kind: SpawnKind;
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  cwd?: string;
-  tag: string;
-};
+import {
+  cleanupSpawnedDir,
+  computeRelPath,
+  defaultRelativeInstanceId,
+  ensureDir,
+  fileStatSafe,
+  isPidAlive,
+  loadOrCreateOwnerToken,
+  normalizeSlash,
+  nowMs,
+  pickFreePort,
+  readSpawnedRecord,
+  removeFileIfExists,
+  safeBaseName,
+  spawnedJsonPath,
+  spawnedStderrPath,
+  spawnedStdoutPath,
+  writeSpawnedPidsFile,
+  writeSpawnedRecord,
+} from "./fs.ts";
 
-export type SpawnDriver = {
-  kind: SpawnKind;
-  buildPlan(args: {
-    dbPath: string;
-    listenHost: string;
-    port: number;
-    sqlpageEnv: SqlpageEnv;
-    surveilrBin: string;
-    sqlpageBin: string;
-    dbYardConfig: Record<string, unknown>;
-  }): SpawnPlan;
-};
-
-export function makeDefaultDrivers(): SpawnDriver[] {
-  const rssd: SpawnDriver = {
-    kind: "rssd",
-    buildPlan: (a) => {
-      const bin = typeof a.dbYardConfig["surveilr.bin"] === "string"
-        ? String(a.dbYardConfig["surveilr.bin"])
-        : a.surveilrBin;
-
-      const extraArgs = Array.isArray(a.dbYardConfig["surveilr.args"])
-        ? (a.dbYardConfig["surveilr.args"] as unknown[]).map(String)
-        : [];
-
-      return {
-        kind: "rssd",
-        command: bin,
-        args: [
-          "web-ui",
-          "-d",
-          a.dbPath,
-          "--port",
-          String(a.port),
-          ...extraArgs,
-        ],
-        env: {},
-        tag: `rssd:${safeBaseName(a.dbPath)}`,
-      };
-    },
-  };
-
-  const sqlpage: SpawnDriver = {
-    kind: "sqlpage",
-    buildPlan: (a) => {
-      const bin = typeof a.dbYardConfig["sqlpage.bin"] === "string"
-        ? String(a.dbYardConfig["sqlpage.bin"])
-        : a.sqlpageBin;
-
-      const env: Record<string, string> = {
-        DATABASE_URL: buildSqlpageDatabaseUrl(a.dbPath),
-        LISTEN_ON: `${a.listenHost}:${a.port}`,
-        SQLPAGE_ENVIRONMENT: a.sqlpageEnv,
-      };
-
-      const extraEnv = a.dbYardConfig["sqlpage.env"];
-      if (
-        extraEnv && typeof extraEnv === "object" && !Array.isArray(extraEnv)
-      ) {
-        for (
-          const [k, v] of Object.entries(extraEnv as Record<string, unknown>)
-        ) {
-          env[k] = String(v);
-        }
-      }
-
-      const extraArgs = Array.isArray(a.dbYardConfig["sqlpage.args"])
-        ? (a.dbYardConfig["sqlpage.args"] as unknown[]).map(String)
-        : [];
-
-      return {
-        kind: "sqlpage",
-        command: bin,
-        args: [...extraArgs],
-        env,
-        tag: `sqlpage:${safeBaseName(a.dbPath)}`,
-      };
-    },
-  };
-
-  return [rssd, sqlpage];
-}
-
-export type OrchestratorConfig = {
-  watchGlobs: string[];
-  watchRoots: string[];
-
-  spawnedDir: string;
-  listenHost: string;
-  reconcileMs: number;
-
-  sqlpageEnv: SqlpageEnv;
-  sqlpageBin: string;
-  surveilrBin: string;
-
-  spawnedCtxExec: string;
-  spawnedCtxSqls: string[];
-
-  adoptForeignState: boolean;
-  verbose: boolean;
-
-  drivers?: SpawnDriver[];
-};
+import {
+  compileGlobMatchers,
+  deriveWatchDirsFromGlobs,
+  expandAll,
+  matchesAny,
+} from "./watch.ts";
+import {
+  readDbYardConfig,
+  runSqliteQueryViaCli,
+  tableExists,
+} from "./sqlite.ts";
+import { makeDefaultDrivers } from "./spawnable.ts";
+import { vlog } from "./text-ui.ts";
 
 export type Orchestrator = {
   runningByDb: Map<string, Running>;
   close(): void;
 };
 
-async function readSpawnedRecord(
-  path: string,
-): Promise<SpawnedRecord | undefined> {
-  try {
-    const raw = await Deno.readTextFile(path);
-    const obj = JSON.parse(raw);
-    if (!obj || obj.version !== 1) return undefined;
-    return obj as SpawnedRecord;
-  } catch {
-    return undefined;
+function compileEnvRegex(list: readonly string[] | undefined): RegExp[] {
+  const out: RegExp[] = [];
+  for (const s of list ?? []) {
+    const t = String(s ?? "").trim();
+    if (!t) continue;
+    try {
+      out.push(new RegExp(t));
+    } catch {
+      // ignore invalid regex
+    }
   }
+  return out;
 }
 
-async function writeSpawnedRecord(
-  path: string,
-  rec: SpawnedRecord,
-): Promise<void> {
-  const tmp = `${path}.tmp`;
-  await Deno.writeTextFile(tmp, JSON.stringify(rec, null, 2));
-  await Deno.rename(tmp, path);
-}
-
-async function removeFileIfExists(path: string): Promise<void> {
-  try {
-    await Deno.remove(path);
-  } catch {
-    // ignore
+function filterEnv(
+  env: Record<string, string>,
+  allowRegex: readonly string[] | undefined,
+): Record<string, string> {
+  const matchers = compileEnvRegex(allowRegex);
+  if (!matchers.length) return env; // default: inherit everything (current behavior)
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (matchers.some((rx) => rx.test(k))) out[k] = v;
   }
+  return out;
 }
 
 export async function stopByPid(pid: number) {
-  // Prefer killing the process group when we detached with setsid.
+  // Platform-specific: on POSIX we try process-group kill first (negative pid).
   const killGroup = () => {
     try {
-      // Negative pid targets the process group on POSIX.
       Deno.kill(-pid, "SIGTERM");
       return true;
     } catch {
@@ -209,7 +105,6 @@ export async function stopByPid(pid: number) {
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  // Escalate
   if (Deno.build.os !== "windows") {
     try {
       Deno.kill(-pid, "SIGKILL");
@@ -219,49 +114,6 @@ export async function stopByPid(pid: number) {
     }
   }
   killSingle("SIGKILL");
-}
-
-async function cleanupSpawnedDir(spawnedDir: string, liveDbPaths: Set<string>) {
-  try {
-    for await (const e of Deno.readDir(spawnedDir)) {
-      if (!e.isFile || !e.name.endsWith(".json")) continue;
-      const p = `${spawnedDir}/${e.name}`;
-      const rec = await readSpawnedRecord(p);
-      if (!rec?.dbPath) continue;
-      if (!liveDbPaths.has(rec.dbPath)) {
-        await removeFileIfExists(p);
-      }
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function spawnedJsonPath(
-  spawnedDir: string,
-  dbBasename: string,
-  instanceId: string,
-): string {
-  const idHash = fnv1a32Hex(instanceId);
-  return `${normalizePath(spawnedDir)}/${dbBasename}.${idHash}.json`;
-}
-
-function spawnedStdoutPath(
-  spawnedDir: string,
-  dbBasename: string,
-  instanceId: string,
-): string {
-  const idHash = fnv1a32Hex(instanceId);
-  return `${normalizePath(spawnedDir)}/${dbBasename}.${idHash}.stdout.log`;
-}
-
-function spawnedStderrPath(
-  spawnedDir: string,
-  dbBasename: string,
-  instanceId: string,
-): string {
-  const idHash = fnv1a32Hex(instanceId);
-  return `${normalizePath(spawnedDir)}/${dbBasename}.${idHash}.stderr.log`;
 }
 
 function buildOwnerIdentity(args: { ownerToken: string }): OwnerIdentity {
@@ -311,26 +163,7 @@ async function runSpawnedCtxBundle(args: {
   return out;
 }
 
-async function tableExists(args: {
-  sqliteExec: string;
-  dbPath: string;
-  name: string;
-}): Promise<boolean> {
-  const nameEsc = args.name.replaceAll("'", "''");
-  const sql =
-    `select 1 as ok from sqlite_master where (type='table' or type='view') and name='${nameEsc}' limit 1`;
-  const snap = await runSqliteQueryViaCli({
-    exec: args.sqliteExec,
-    dbPath: args.dbPath,
-    sql,
-  });
-  if (!snap.ok) return false;
-  if (Array.isArray(snap.output)) return snap.output.length > 0;
-  const s = typeof snap.output === "string" ? snap.output.trim() : "";
-  return s.length > 0;
-}
-
-type DriverChoice = "rssd" | "sqlpage" | undefined;
+type DriverChoice = SpawnKind | undefined;
 
 async function chooseDriver(args: {
   sqliteExec: string;
@@ -366,43 +199,13 @@ async function chooseDriver(args: {
   return undefined;
 }
 
-function compileGlobMatchers(globs: readonly string[]): RegExp[] {
-  const out: RegExp[] = [];
-  for (const g of globs) {
-    try {
-      out.push(globToRegExp(g, { extended: true, globstar: true }));
-    } catch {
-      // ignore invalid glob
-    }
-  }
-  return out;
-}
-
-function matchesAny(path: string, matchers: readonly RegExp[]): boolean {
-  const p = normalizePath(path);
-  for (const rx of matchers) if (rx.test(p)) return true;
-  return false;
-}
-
-async function expandAll(globs: readonly string[]): Promise<string[]> {
-  const out: string[] = [];
-  for (const g of globs) {
-    for await (const e of expandGlob(g, { globstar: true })) {
-      if (e.isFile) out.push(normalizePath(e.path));
-    }
-  }
-  return out;
-}
-
 function dbChanged(rec: SpawnedRecord, st: Deno.FileInfo): boolean {
   const size = st.size;
   const mtime = st.mtime?.getTime() ?? 0;
   return size !== rec.fileSize || mtime !== rec.fileMtimeMs;
 }
 
-// Anti-storm throttle.
 const RESPAWN_BACKOFF_MS = 15_000;
-// “Fast exit” threshold.
 const FAST_EXIT_MS = 750;
 
 type SpawnFailure = { lastFailAtMs: number; failCount: number };
@@ -434,30 +237,25 @@ async function updatePidsFileFromRunning(args: {
 }
 
 function shellQuote(s: string): string {
-  // Minimal POSIX-safe quoting
+  // Platform-specific: POSIX quoting for the "sh -lc" detach script.
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-/**
- * Detach a long-running service so it survives orchestrator crashes:
- * - setsid: new session/process group
- * - nohup: ignore SIGHUP
- * - redirects stdout/stderr to files (no pipes, no SIGPIPE risk)
- * - runs in background and prints PID
- */
 async function spawnDetachedAndGetPid(args: {
   command: string;
   argv: string[];
+  // plan env (per-db)
   env: Record<string, string>;
+  // inherited env (from yard process, possibly filtered)
+  inheritedEnv: Record<string, string>;
   cwd?: string;
   stdoutPath: string;
   stderrPath: string;
 }): Promise<number> {
   if (Deno.build.os === "windows") {
-    // Windows: best-effort (no setsid/nohup). Still avoid pipes.
     const child = new Deno.Command(args.command, {
       args: args.argv,
-      env: { ...Deno.env.toObject(), ...args.env },
+      env: { ...args.inheritedEnv, ...args.env },
       cwd: args.cwd,
       stdin: "null",
       stdout: "null",
@@ -478,7 +276,6 @@ async function spawnDetachedAndGetPid(args: {
 
   const script = [
     args.cwd ? `cd ${shellQuote(args.cwd)};` : "",
-    // setsid + nohup + redirect + background + echo pid
     `setsid nohup sh -lc ${shellQuote(cmdPart)} >> ${
       shellQuote(args.stdoutPath)
     } 2>> ${shellQuote(args.stderrPath)} < /dev/null & echo $!`,
@@ -489,7 +286,7 @@ async function spawnDetachedAndGetPid(args: {
     stdin: "null",
     stdout: "piped",
     stderr: "piped",
-    env: Deno.env.toObject(),
+    env: args.inheritedEnv,
   }).output();
 
   const stdout = new TextDecoder().decode(out.stdout).trim();
@@ -514,6 +311,7 @@ export async function startOrchestrator(
 ): Promise<Orchestrator> {
   const drivers = cfg.drivers ?? makeDefaultDrivers();
   const matchers = compileGlobMatchers(cfg.watchGlobs);
+  const inheritedEnv = filterEnv(Deno.env.toObject(), cfg.inheritEnvRegex);
 
   await ensureDir(cfg.spawnedDir);
 
@@ -526,7 +324,7 @@ export async function startOrchestrator(
 
   let closed = false;
 
-  // Adopt state
+  // Adopt state from JSON ledger.
   for await (const e of Deno.readDir(cfg.spawnedDir)) {
     if (!e.isFile || !e.name.endsWith(".json")) continue;
     const p = `${cfg.spawnedDir}/${e.name}`;
@@ -604,10 +402,12 @@ export async function startOrchestrator(
   function noteFailure(dbPath: string) {
     const f = failuresByDb.get(dbPath);
     if (!f) failuresByDb.set(dbPath, { lastFailAtMs: nowMs(), failCount: 1 });
-    else {failuresByDb.set(dbPath, {
+    else {
+      failuresByDb.set(dbPath, {
         lastFailAtMs: nowMs(),
         failCount: f.failCount + 1,
-      });}
+      });
+    }
   }
 
   async function ensureSpawnedForDb(
@@ -692,6 +492,7 @@ export async function startOrchestrator(
         command: plan.command,
         argv: plan.args,
         env: plan.env,
+        inheritedEnv,
         cwd: plan.cwd,
         stdoutPath: stdoutLogPath,
         stderrPath: stderrLogPath,
@@ -708,7 +509,6 @@ export async function startOrchestrator(
       return;
     }
 
-    // Fast-exit check (we no longer have a ChildProcess handle, so just probe PID)
     await new Promise((r) => setTimeout(r, FAST_EXIT_MS));
     if (!isPidAlive(pid)) {
       noteFailure(dbAbsPath);
@@ -883,7 +683,7 @@ export async function startOrchestrator(
   }
 
   function enqueue(path: string, hint?: string) {
-    const p = normalizePath(path);
+    const p = normalizeSlash(path);
     if (!matchesAny(p, matchers)) return;
     pending.add(p);
     vlog(cfg.verbose, "detect", hint ? `event ${hint}` : "event", { path: p });
@@ -891,15 +691,7 @@ export async function startOrchestrator(
 
   await reconcileFull();
 
-  // Watch dirs derived from actual matches (no globParent)
-  const watchDirs = new Set<string>();
-  for (const g of cfg.watchGlobs) {
-    for await (const e of expandGlob(g, { globstar: true })) {
-      if (!e.isFile) continue;
-      watchDirs.add(normalizePath(dirname(e.path)));
-    }
-  }
-  if (watchDirs.size === 0) watchDirs.add(normalizePath(Deno.cwd()));
+  const watchDirs = await deriveWatchDirsFromGlobs(cfg.watchGlobs);
 
   for (const d of watchDirs) {
     (async () => {

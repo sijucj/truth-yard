@@ -51,9 +51,13 @@ where appropriate.
 
 ## CLI Overview
 
-```
+```bash
 bin/yard.ts [options]
-bin/yard.ts processes [options]
+bin/yard.ts spawned [options]
+
+# helpers
+bin/yard.ts help
+bin/yard.ts completions
 ```
 
 - The default command starts the orchestrator.
@@ -89,44 +93,57 @@ bin/yard.ts processes [options]
 
 ## Common Usage Patterns
 
-### 1. Default usage (recommended starting point)
+### Default usage (recommended starting point)
 
 Watch all SQLite databases under `cargo.d` recursively.
 
-```
+```bash
 yard.ts
 ```
 
 Equivalent to:
 
-```
+```bash
 yard.ts --watch './cargo.d/**/*.db'
 ```
 
 Output is intentionally minimal unless `--verbose` is used.
 
-### 2. Explicit watch glob
+### Explicit watch glob
 
 Use this when you want to be very clear about what is watched.
 
-```
+```bash
 yard.ts --watch './cargo.d/**/*.db'
 ```
 
 You can repeat `--watch` multiple times:
 
-```
+```bash
 yard.ts \
   --watch './cargo.d/**/*.db' \
   --watch './other-cargo/**/*.sqlite'
 ```
 
-### 3. Verbose, operator-friendly output
+### Environment variables
+
+By default, `yard.ts` unsafely passes all env vars to spawned processes. If
+that's not secure enough, you can use `--env` to help secure which env vars are
+passed into spawned processes:
+
+```bash
+bin/yard.ts \
+  --env '^(PATH|HOME|USER|SHELL|LANG|LC_|TERM|TZ)$' \
+  --env '^DBYARD_' \
+  --env '^SQLPAGE_'
+```
+
+### Verbose, operator-friendly output
 
 Shows colored messages when databases are detected, spawned, reconciled, or
 stopped.
 
-```
+```bash
 db-yard --verbose
 ```
 
@@ -136,27 +153,27 @@ Verbose mode also prints:
 - stdout/stderr log file locations
 - reconciliation actions (only when something actually changes)
 
-### 4. Custom spawned state directory
+### Custom spawned state directory
 
 Useful in CI, containers, or multi-user environments.
 
-```
+```bash
 yard.ts --spawned-state-path /var/db-yard/spawned
 ```
 
 Each run still creates a timestamped session directory inside this path.
 
-### 5. Enable the admin server (optional)
+### Enable the admin server (optional)
 
 Starts a lightweight HTTP admin endpoint for introspection.
 
-```
+```bash
 yard.ts --admin-port 9090
 ```
 
 Optional host override:
 
-```
+```bash
 yard.ts --admin-port 9090 --admin-host 0.0.0.0
 ```
 
@@ -164,7 +181,7 @@ yard.ts --admin-port 9090 --admin-host 0.0.0.0
 
 ### List all managed processes (across sessions)
 
-```
+```bash
 yard.ts spawned
 ```
 
@@ -177,7 +194,7 @@ This scans all session directories and reports:
 
 ### Kill all managed processes (dangerous)
 
-```
+```bash
 yard.ts spawned --kill
 ```
 

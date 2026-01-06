@@ -1,11 +1,14 @@
-/**
- * lib/admin.ts
- *
- * Optional admin server, isolated.
- * Reads running state via accessor and runs ad-hoc SQL via sqlite CLI runner.
- */
+// lib/admin.ts
 import type { Running } from "./governance.ts";
-import { jsonResponse, nowMs, runSqliteQueryViaCli } from "./governance.ts";
+import { runSqliteQueryViaCli } from "./sqlite.ts";
+import { nowMs } from "./fs.ts";
+
+function jsonResponse(obj: unknown, status = 200): Response {
+  return new Response(JSON.stringify(obj, null, 2), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
 
 export function startAdminServer(args: {
   adminHost: string;
