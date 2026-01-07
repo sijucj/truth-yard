@@ -24,7 +24,7 @@
  * Platform notes:
  * - Reverse proxy uses fetch() streaming and assumes local http targets.
  */
-import type { Running } from "./governance.ts";
+import type { Running, SpawnedProcess } from "./governance.ts";
 
 function nowMs() {
   return Date.now();
@@ -253,9 +253,9 @@ function buildRootIndexHtml(args: {
     const upstream = `${rec.listenHost}:${rec.port}`;
     const rel = rec.dbRelPath ?? rec.dbBasename;
     return `<div class="row">
-  <span class="col col-prefix"><a href="${escapeHtml(href)}">${
-      escapeHtml(prefix)
-    }</a></span>
+  <span class="col col-prefix"><a href="${
+      escapeHtml(`http://${upstream}${href}`)
+    }">${escapeHtml(`http://${upstream}${href}`)}</a></span>
   <span class="col col-up">${escapeHtml(upstream)}</span>
   <span class="col col-kind">${escapeHtml(rec.kind)}</span>
   <span class="col col-rel">${escapeHtml(rel)}</span>
@@ -276,7 +276,7 @@ function buildRootIndexHtml(args: {
     .row:first-child { border-top: none; }
     .row.head { background: #f7f7f7; font-weight: 600; }
     .col { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .col-prefix { width: 320px; }
+    .col-prefix { width: 450px; }
     .col-up { width: 180px; }
     .col-kind { width: 90px; }
     .col-rel { flex: 1; }
@@ -301,7 +301,7 @@ function buildRootIndexHtml(args: {
 
   <div style="margin-top:14px;" class="grid">
     <div class="row head">
-      <span class="col col-prefix">prefix (click)</span>
+      <span class="col col-prefix">proxy (click)</span>
       <span class="col col-up">upstream</span>
       <span class="col col-kind">kind</span>
       <span class="col col-rel">db rel</span>
@@ -346,7 +346,7 @@ function buildAdminIndexHtml(args: {
   <span class="col col-kind">${kind}</span>
   <span class="col col-host">${host}</span>
   <span class="col col-prefix"><a href="${
-        escapeHtml(hrefPrefix)
+        escapeHtml(`http://${rec.listenHost}:${rec.port}${hrefPrefix}`)
       }">${prefix}</a></span>
   <span class="col col-db">${db}</span>
 </div>`;
@@ -411,7 +411,7 @@ function buildAdminIndexHtml(args: {
         <span class="col col-id">id (click)</span>
         <span class="col col-kind">kind</span>
         <span class="col col-host">host</span>
-        <span class="col col-prefix">prefix (click)</span>
+        <span class="col col-prefix">proxy (click)</span>
         <span class="col col-db">dbPath</span>
       </div>
       ${
@@ -454,21 +454,6 @@ function buildAdminIndexHtml(args: {
 </html>`;
 }
 
-function findRunningById(
-  getRunning: () => Running[],
-  id: string,
-): Running | undefined {
-  const t = id.trim();
-  if (!t) return undefined;
-  return getRunning().find((r) => r.record.id === t);
-}
-
-function pickDefaultRunning(getRunning: () => Running[]): Running | undefined {
-  const items = getRunning();
-  if (items.length === 1) return items[0];
-  return undefined;
-}
-
 function pickRunningByPrefix(
   getRunning: () => Running[],
   pathname: string,
@@ -487,7 +472,11 @@ function pickRunningByPrefix(
   return best;
 }
 
-async function proxyToTarget(req: Request, targetBase: URL): Promise<Response> {
+async function proxyToTarget(
+  req: Request,
+  targetBase: URL,
+  sp: SpawnedProcess,
+): Promise<Response> {
   const u = new URL(req.url);
 
   const outUrl = new URL(targetBase.toString());
@@ -496,6 +485,8 @@ async function proxyToTarget(req: Request, targetBase: URL): Promise<Response> {
 
   // copy headers, but set Host to target host
   const headers = new Headers(req.headers);
+  headers.set("SQLPAGE_SITE_PREFIX", sp.proxyEndpointPrefix);
+  headers.set("db-yard-proxyEndpointPrefix", sp.proxyEndpointPrefix);
   headers.set("host", outUrl.host);
 
   const init: RequestInit = {
@@ -634,10 +625,11 @@ export function startWebUiServer(args: {
       const id = pathname.slice("/SQL/unsafe/".length, -".json".length).trim();
       if (!id) return jsonResponse({ ok: false, error: "missing id" }, 400);
 
-      const running = findRunningById(getRunning, id);
-      if (!running) {
+      const picked = pickRunningByPrefix(getRunning, id);
+      if (!picked) {
         return jsonResponse({ ok: false, error: "unknown id" }, 404);
       }
+      const { running } = picked;
 
       let body: SqlUnsafeBody;
       try {
@@ -675,44 +667,13 @@ export function startWebUiServer(args: {
     }
 
     // Reverse proxy (all other paths)
-    const segments = pathname.split("/").filter(Boolean);
-    const first = segments[0] ?? "";
-
-    // 1) /<id>/... (strip id)
-    let target = findRunningById(getRunning, first);
+    const target = pickRunningByPrefix(getRunning, pathname);
     if (target) {
-      const rest = "/" + segments.slice(1).join("/");
-      const u2 = new URL(req.url);
-      u2.pathname = rest === "/" ? "/" : rest;
-      const req2 = new Request(u2.toString(), req);
+      const { running } = target;
       const base = new URL(
-        `http://${target.record.listenHost}:${target.record.port}`,
+        `http://${running.record.listenHost}:${running.record.port}`,
       );
-      return await proxyToTarget(req2, base);
-    }
-
-    // 2) prefix routing (strip prefix)
-    const hit = pickRunningByPrefix(getRunning, pathname);
-    if (hit) {
-      const pfx = hit.prefix;
-      const rest = pathname.slice(pfx.length - 1); // keep leading "/"
-      const u2 = new URL(req.url);
-      u2.pathname = rest && rest.startsWith("/") ? rest : "/";
-      const req2 = new Request(u2.toString(), req);
-
-      const base = new URL(
-        `http://${hit.running.record.listenHost}:${hit.running.record.port}`,
-      );
-      return await proxyToTarget(req2, base);
-    }
-
-    // 3) exactly one instance -> unchanged
-    target = pickDefaultRunning(getRunning);
-    if (target) {
-      const base = new URL(
-        `http://${target.record.listenHost}:${target.record.port}`,
-      );
-      return await proxyToTarget(req, base);
+      return await proxyToTarget(req, base, running.record);
     }
 
     return jsonResponse(

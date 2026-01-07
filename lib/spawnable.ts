@@ -95,6 +95,7 @@ export function makeDefaultDrivers(): SpawnDriver[] {
           ...extraArgs,
         ],
         env: {
+          SQLPAGE_SITE_PREFIX: a.proxyEndpointPrefix,
           ...envBlock,
         },
         tag: `rssd:${safeBaseName(a.dbPath)}`,
@@ -139,6 +140,7 @@ export function makeDefaultDrivers(): SpawnDriver[] {
         command: bin,
         args: [...extraArgs],
         env: {
+          SQLPAGE_SITE_PREFIX: a.proxyEndpointPrefix,
           ...baseEnv,
           ...extraEnvObj,
           ...envBlock,

@@ -272,12 +272,23 @@ export function computeRelPath(
   dbAbsPath: string,
 ): string | undefined {
   const db = normalizeSlash(dbAbsPath);
+
+  let bestRoot: string | undefined;
+
   for (const r0 of watchRootsAbs) {
     const r = normalizeSlash(r0).replace(/\/+$/, "");
-    if (db === r) return ".";
-    if (db.startsWith(r + "/")) return db.slice(r.length + 1);
+
+    if (db === r || db.startsWith(r + "/")) {
+      if (!bestRoot || r.length < bestRoot.length) {
+        bestRoot = r;
+      }
+    }
   }
-  return undefined;
+
+  if (!bestRoot) return undefined;
+
+  if (db === bestRoot) return ".";
+  return db.slice(bestRoot.length + 1);
 }
 
 export function defaultRelativeInstanceId(relOrAbs: string): string {
