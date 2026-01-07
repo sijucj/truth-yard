@@ -1,4 +1,4 @@
-// lib/reverse-proxy-conf.ts (updated defaults: no strip, prefix from dbRelPath)
+// lib/reverse-proxy-conf.ts
 import { normalize as normalizePath } from "@std/path";
 import { ensureDir, liveSpawnedRecords, normalizeSlash } from "./fs.ts";
 import type { SpawnedProcess } from "./governance.ts";

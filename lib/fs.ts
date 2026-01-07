@@ -1,5 +1,6 @@
 // lib/fs.ts
 import { dirname as stdDirname } from "@std/path/dirname";
+import { normalize as stdNormalize } from "@std/path/normalize";
 import type { SpawnedProcess } from "./governance.ts";
 
 const text = new TextDecoder();
@@ -73,31 +74,81 @@ export function fnv1a32Hex(s: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-export function spawnedJsonPath(
-  spawnedDir: string,
-  dbBasename: string,
-  instanceId: string,
-): string {
-  const idHash = fnv1a32Hex(instanceId);
-  return `${normalizeSlash(spawnedDir)}/${dbBasename}.${idHash}.json`;
+function toSafeRelativeDir(rel: string): string {
+  // Normalize and keep it safely relative.
+  // - no absolute paths
+  // - no ".." segments
+  // - strip leading "./" and leading "/"
+  const n = normalizeSlash(stdNormalize(normalizeSlash(rel)))
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "");
+
+  if (!n) return "";
+
+  const parts = n.split("/").filter((x) => x.length > 0);
+  const safe: string[] = [];
+  for (const part of parts) {
+    if (part === "." || part === "..") continue;
+    safe.push(part);
+  }
+  return safe.join("/");
 }
 
-export function spawnedStdoutPath(
-  spawnedDir: string,
-  dbBasename: string,
-  instanceId: string,
-): string {
-  const idHash = fnv1a32Hex(instanceId);
-  return `${normalizeSlash(spawnedDir)}/${dbBasename}.${idHash}.stdout.log`;
+export function spawnedSubdirForDb(args: {
+  spawnedDir: string;
+  dbRelPath?: string;
+}): string {
+  const root = normalizeSlash(args.spawnedDir).replace(/\/+$/, "");
+  const rel = typeof args.dbRelPath === "string" ? args.dbRelPath.trim() : "";
+  if (!rel) return root;
+
+  // Store under the directory portion of dbRelPath.
+  const dir = toSafeRelativeDir(dirname(rel));
+  if (!dir || dir === ".") return root;
+
+  return normalizeSlash(`${root}/${dir}`);
 }
 
-export function spawnedStderrPath(
-  spawnedDir: string,
-  dbBasename: string,
-  instanceId: string,
-): string {
-  const idHash = fnv1a32Hex(instanceId);
-  return `${normalizeSlash(spawnedDir)}/${dbBasename}.${idHash}.stderr.log`;
+export function spawnedJsonPath(args: {
+  spawnedDir: string;
+  dbRelPath?: string;
+  dbBasename: string;
+  instanceId: string;
+}): string {
+  const idHash = fnv1a32Hex(args.instanceId);
+  const dir = spawnedSubdirForDb({
+    spawnedDir: args.spawnedDir,
+    dbRelPath: args.dbRelPath,
+  });
+  return `${dir}/${args.dbBasename}.${idHash}.json`;
+}
+
+export function spawnedStdoutPath(args: {
+  spawnedDir: string;
+  dbRelPath?: string;
+  dbBasename: string;
+  instanceId: string;
+}): string {
+  const idHash = fnv1a32Hex(args.instanceId);
+  const dir = spawnedSubdirForDb({
+    spawnedDir: args.spawnedDir,
+    dbRelPath: args.dbRelPath,
+  });
+  return `${dir}/${args.dbBasename}.${idHash}.stdout.log`;
+}
+
+export function spawnedStderrPath(args: {
+  spawnedDir: string;
+  dbRelPath?: string;
+  dbBasename: string;
+  instanceId: string;
+}): string {
+  const idHash = fnv1a32Hex(args.instanceId);
+  const dir = spawnedSubdirForDb({
+    spawnedDir: args.spawnedDir,
+    dbRelPath: args.dbRelPath,
+  });
+  return `${dir}/${args.dbBasename}.${idHash}.stderr.log`;
 }
 
 export async function loadOrCreateOwnerToken(
@@ -154,9 +205,13 @@ export async function writeSpawnedRecord(
   path: string,
   rec: SpawnedProcess,
 ): Promise<void> {
-  const tmp = `${path}.tmp`;
+  const p = normalizeSlash(path);
+  const dir = dirname(p);
+  if (dir) await ensureDir(dir);
+
+  const tmp = `${p}.tmp`;
   await Deno.writeTextFile(tmp, JSON.stringify(rec, null, 2));
-  await Deno.rename(tmp, path);
+  await Deno.rename(tmp, p);
 }
 
 export async function removeFileIfExists(path: string): Promise<void> {
@@ -171,19 +226,34 @@ export async function cleanupSpawnedDir(
   spawnedDir: string,
   liveDbPaths: Set<string>,
 ) {
-  try {
-    for await (const e of Deno.readDir(spawnedDir)) {
-      if (!e.isFile || !e.name.endsWith(".json")) continue;
-      const p = `${spawnedDir}/${e.name}`;
+  const root = normalizeSlash(spawnedDir);
+
+  async function walk(dir: string) {
+    let it: AsyncIterable<Deno.DirEntry>;
+    try {
+      it = Deno.readDir(dir);
+    } catch {
+      return;
+    }
+
+    for await (const e of it) {
+      const p = normalizeSlash(`${dir}/${e.name}`);
+      if (e.isDirectory) {
+        await walk(p);
+        continue;
+      }
+      if (!e.isFile || !p.endsWith(".json")) continue;
+
       const rec = await readSpawnedRecord(p);
       if (!rec?.dbPath) continue;
+
       if (!liveDbPaths.has(rec.dbPath)) {
         await removeFileIfExists(p);
       }
     }
-  } catch {
-    // ignore
   }
+
+  await walk(root);
 }
 
 export async function readProcCmdline(

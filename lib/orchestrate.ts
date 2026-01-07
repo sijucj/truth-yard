@@ -367,24 +367,40 @@ export async function startOrchestrator(
 
   let closed = false;
 
-  // Adopt state from JSON ledger.
-  for await (const e of Deno.readDir(cfg.spawnedDir)) {
-    if (!e.isFile || !e.name.endsWith(".json")) continue;
-    const p = `${cfg.spawnedDir}/${e.name}`;
-    const rec = await readSpawnedRecord(p);
-    if (!rec?.dbPath) continue;
-
-    const st = await fileStatSafe(rec.dbPath);
-    if (!st?.isFile) {
-      await removeFileIfExists(p);
-      continue;
+  // Adopt state from JSON ledger (recursive).
+  async function adoptFromDir(dir: string) {
+    let it: AsyncIterable<Deno.DirEntry>;
+    try {
+      it = Deno.readDir(dir);
+    } catch {
+      return;
     }
 
-    const ownedByToken = rec.owner?.ownerToken === owner.ownerToken;
-    if (!ownedByToken && !cfg.adoptForeignState) continue;
+    for await (const e of it) {
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory) {
+        await adoptFromDir(p);
+        continue;
+      }
+      if (!e.isFile || !e.name.endsWith(".json")) continue;
 
-    runningByDb.set(rec.dbPath, { record: rec });
+      const rec = await readSpawnedRecord(p);
+      if (!rec?.dbPath) continue;
+
+      const st = await fileStatSafe(rec.dbPath);
+      if (!st?.isFile) {
+        await removeFileIfExists(p);
+        continue;
+      }
+
+      const ownedByToken = rec.owner?.ownerToken === owner.ownerToken;
+      if (!ownedByToken && !cfg.adoptForeignState) continue;
+
+      runningByDb.set(rec.dbPath, { record: rec });
+    }
   }
+
+  await adoptFromDir(cfg.spawnedDir);
 
   await updatePidsFileFromRunning({
     spawnedDir: cfg.spawnedDir,
@@ -426,7 +442,12 @@ export async function startOrchestrator(
       dbBasename: rec.dbBasename,
     });
 
-    const jsonPath = spawnedJsonPath(cfg.spawnedDir, rec.dbBasename, rec.id);
+    const jsonPath = spawnedJsonPath({
+      spawnedDir: cfg.spawnedDir,
+      dbRelPath: rec.dbRelPath,
+      dbBasename: rec.dbBasename,
+      instanceId: rec.id,
+    });
     await writeSpawnedRecord(jsonPath, rec);
 
     counters.refreshed++;
@@ -537,8 +558,32 @@ export async function startOrchestrator(
       proxyEndpointPrefix,
     });
 
-    const stdoutLogPath = spawnedStdoutPath(cfg.spawnedDir, dbBasename, id);
-    const stderrLogPath = spawnedStderrPath(cfg.spawnedDir, dbBasename, id);
+    const stdoutLogPath = spawnedStdoutPath({
+      spawnedDir: cfg.spawnedDir,
+      dbRelPath: rel,
+      dbBasename,
+      instanceId: id,
+    });
+    const stderrLogPath = spawnedStderrPath({
+      spawnedDir: cfg.spawnedDir,
+      dbRelPath: rel,
+      dbBasename,
+      instanceId: id,
+    });
+
+    // Ensure nested dirs exist (for logs too).
+    await ensureDir(
+      normalizeSlash(stdoutLogPath).slice(
+        0,
+        Math.max(0, normalizeSlash(stdoutLogPath).lastIndexOf("/")),
+      ),
+    );
+    await ensureDir(
+      normalizeSlash(stderrLogPath).slice(
+        0,
+        Math.max(0, normalizeSlash(stderrLogPath).lastIndexOf("/")),
+      ),
+    );
 
     let pid: number;
     try {
@@ -614,7 +659,12 @@ export async function startOrchestrator(
 
     runningByDb.set(dbAbsPath, { record: rec });
 
-    const jsonPath = spawnedJsonPath(cfg.spawnedDir, rec.dbBasename, rec.id);
+    const jsonPath = spawnedJsonPath({
+      spawnedDir: cfg.spawnedDir,
+      dbRelPath: rec.dbRelPath,
+      dbBasename: rec.dbBasename,
+      instanceId: rec.id,
+    });
     await writeSpawnedRecord(jsonPath, rec);
 
     await updatePidsFileFromRunning({
@@ -671,7 +721,12 @@ export async function startOrchestrator(
     await stopByPid(rec.pid);
     runningByDb.delete(dbAbsPath);
 
-    const jsonPath = spawnedJsonPath(cfg.spawnedDir, rec.dbBasename, rec.id);
+    const jsonPath = spawnedJsonPath({
+      spawnedDir: cfg.spawnedDir,
+      dbRelPath: rec.dbRelPath,
+      dbBasename: rec.dbBasename,
+      instanceId: rec.id,
+    });
     await removeFileIfExists(jsonPath);
 
     await updatePidsFileFromRunning({

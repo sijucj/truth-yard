@@ -6,23 +6,9 @@
  * - GET  /                       -> HTML index of available proxy paths (prefix routing)
  * - GET  /.admin                 -> JSON runtime state
  * - GET  /.admin/index.html       -> HTML directory-style listing of JSON + logs in spawnedDir
- * - GET  /.admin/files/<name>     -> serve a file from spawnedDir (json/log/txt)
+ * - GET  /.admin/files/<name>     -> serve a file from spawnedDir (json/log/txt) (supports subdirs)
  * - POST /SQL/unsafe/<id>.json    -> run ad-hoc SQL against a known DB (UNSAFE)
  * - ALL OTHER PATHS              -> reverse proxy to a spawned service
- *
- * Reverse proxy routing (in order):
- * 1) If path starts with "/<id>/...", proxies to that instance id
- * 2) Else if path matches a computed prefix, proxies to that instance
- *    - Default prefix:
- *      - use relative path from watch root (dbRelPath directory)
- *      - plus db filename without ".sqlite.db" or ".db"
- *      - ex: dbRelPath "abc/def/my.sqlite.db" => "/abc/def/my/"
- *    - Override key in ".db-yard" table: proxy-conf.location-prefix
- * 3) Else if exactly one instance is running, proxies to it (path unchanged)
- * 4) Else 404 with hint
- *
- * Platform notes:
- * - Reverse proxy uses fetch() streaming and assumes local http targets.
  */
 import type { Running, SpawnedProcess } from "./governance.ts";
 
@@ -62,9 +48,21 @@ function proxyPrefixForRunning(r: Running): string {
   return r.record.proxyEndpointPrefix;
 }
 
+function isSafeRelativeSubpath(rel: string): boolean {
+  const s = rel.replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!s) return false;
+  if (s.includes("\0")) return false;
+  const parts = s.split("/").filter((x) => x.length > 0);
+  if (!parts.length) return false;
+  for (const part of parts) {
+    if (part === "." || part === "..") return false;
+  }
+  return true;
+}
+
 async function safeListSpawnedFiles(spawnedDir: string): Promise<
   {
-    name: string;
+    name: string; // relative to spawnedDir (may include subdirs)
     size: number;
     mtimeMs: number;
     kind: "json" | "log" | "other";
@@ -76,27 +74,47 @@ async function safeListSpawnedFiles(spawnedDir: string): Promise<
     mtimeMs: number;
     kind: "json" | "log" | "other";
   }[] = [];
-  try {
-    for await (const e of Deno.readDir(spawnedDir)) {
+
+  const root = spawnedDir.replaceAll("\\", "/").replace(/\/+$/, "");
+
+  async function walk(dirAbs: string, relDir: string) {
+    let it: AsyncIterable<Deno.DirEntry>;
+    try {
+      it = Deno.readDir(dirAbs);
+    } catch {
+      return;
+    }
+
+    for await (const e of it) {
+      const abs = `${dirAbs}/${e.name}`;
+      const rel = relDir ? `${relDir}/${e.name}` : e.name;
+
+      if (e.isDirectory) {
+        await walk(abs, rel);
+        continue;
+      }
       if (!e.isFile) continue;
-      const name = e.name;
-      // hide owner token file, pid file, temp files
+
+      const name = rel.replaceAll("\\", "/");
+
+      // hide owner token file, pid file, temp files (root-level)
       if (name.startsWith(".db-yard.")) continue;
       if (name.endsWith(".tmp")) continue;
       if (name === "spawned-pids.txt") continue;
 
-      const p = `${spawnedDir}/${name}`;
       let st: Deno.FileInfo | undefined;
       try {
-        st = await Deno.stat(p);
+        st = await Deno.stat(abs);
       } catch {
         continue;
       }
+
       const kind = name.endsWith(".json")
         ? "json"
         : (name.endsWith(".stdout.log") || name.endsWith(".stderr.log")
           ? "log"
           : "other");
+
       out.push({
         name,
         size: st.size,
@@ -104,9 +122,9 @@ async function safeListSpawnedFiles(spawnedDir: string): Promise<
         kind,
       });
     }
-  } catch {
-    // ignore
   }
+
+  await walk(root, "");
 
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
@@ -249,7 +267,7 @@ function buildRootIndexHtml(args: {
   const rows = running.map((r) => {
     const rec = r.record;
     const prefix = proxyPrefixForRunning(r);
-    const href = prefix; // absolute on this server
+    const href = prefix;
     const upstream = `${rec.listenHost}:${rec.port}`;
     const rel = rec.dbRelPath ?? rec.dbBasename;
     return `<div class="row">
@@ -307,14 +325,7 @@ function buildRootIndexHtml(args: {
       <span class="col col-rel">db rel</span>
     </div>
     ${rows || `<div class="row"><span class="col muted">none</span></div>`}
-  </div>
-
-  <div class="note muted">
-    Prefix routing strips the prefix when proxying. Id routing <code>/${
-    escapeHtml("<id>")
-  }/...</code> strips <code>/${escapeHtml("<id>")}</code>.
-    If exactly one instance is running, <code>/...</code> proxies to it unchanged.
-  </div>
+  </div>  
 </body>
 </html>`;
 }
@@ -421,8 +432,7 @@ function buildAdminIndexHtml(args: {
     <div class="note muted">
       Id routing: <code>/${escapeHtml("<id>")}/...</code> strips <code>/${
     escapeHtml("<id>")
-  }</code>.
-      Prefix routing strips the prefix. If exactly one instance is running, <code>/...</code> proxies to it unchanged.
+  }</code>.      
     </div>
   </div>
 
@@ -440,7 +450,7 @@ function buildAdminIndexHtml(args: {
   }
     </div>
     <div class="note muted">
-      Raw JSON and logs are served under <code>/.admin/files/&lt;name&gt;</code>.
+      Raw JSON and logs are served under <code>/.admin/files/&lt;name&gt;</code> (supports subdirs).
     </div>
   </div>
 
@@ -483,7 +493,6 @@ async function proxyToTarget(
   outUrl.pathname = u.pathname;
   outUrl.search = u.search;
 
-  // copy headers, but set Host to target host
   const headers = new Headers(req.headers);
   headers.set("SQLPAGE_SITE_PREFIX", sp.proxyEndpointPrefix);
   headers.set("db-yard-proxyEndpointPrefix", sp.proxyEndpointPrefix);
@@ -530,7 +539,6 @@ export function startWebUiServer(args: {
     const url = new URL(req.url);
     const pathname = url.pathname;
 
-    // Root index
     if (req.method === "GET" && pathname === "/") {
       const running = [...getRunning()];
       const html = buildRootIndexHtml({ running });
@@ -540,7 +548,6 @@ export function startWebUiServer(args: {
       });
     }
 
-    // /.admin JSON
     if (req.method === "GET" && pathname === "/.admin") {
       const items = getRunning().map((r) => r.record).sort((a, b) => {
         const ak = `${a.kind}:${a.dbBasename}:${a.dbPath}`;
@@ -557,7 +564,6 @@ export function startWebUiServer(args: {
       });
     }
 
-    // /.admin/index.html
     if (
       req.method === "GET" &&
       (pathname === "/.admin/index.html" || pathname === "/.admin/")
@@ -573,16 +579,17 @@ export function startWebUiServer(args: {
       });
     }
 
-    // serve a file from spawnedDir
+    // serve a file from spawnedDir (supports subdirectories)
     if (req.method === "GET" && pathname.startsWith("/.admin/files/")) {
-      const name = decodeURIComponent(pathname.slice("/.admin/files/".length));
-      if (
-        !name || name.includes("/") || name.includes("\\") ||
-        name.includes("\0")
-      ) {
+      const rel = decodeURIComponent(pathname.slice("/.admin/files/".length))
+        .replaceAll("\\", "/")
+        .replace(/^\/+/, "");
+
+      if (!isSafeRelativeSubpath(rel)) {
         return jsonResponse({ ok: false, error: "invalid file name" }, 400);
       }
-      const p = `${spawnedDir}/${name}`;
+
+      const p = `${spawnedDir}/${rel}`;
       let st: Deno.FileInfo | undefined;
       try {
         st = await Deno.stat(p);
@@ -598,7 +605,7 @@ export function startWebUiServer(args: {
         f = await Deno.open(p, { read: true });
         return new Response(f.readable, {
           status: 200,
-          headers: { "content-type": contentTypeByName(name) },
+          headers: { "content-type": contentTypeByName(rel) },
         });
       } catch (e) {
         try {
@@ -616,7 +623,6 @@ export function startWebUiServer(args: {
     }
 
     // Unsafe SQL
-    // POST /SQL/unsafe/<id>.json
     if (pathname.startsWith("/SQL/unsafe/") && pathname.endsWith(".json")) {
       if (req.method !== "POST") {
         return jsonResponse({ ok: false, error: "POST required" }, 405);
