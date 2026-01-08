@@ -57,6 +57,7 @@
             </div>
         </section>
 
+        Reconcile compares tagged processes vs ledger context.json files and reports discrepancies.
         <section class="card">
             <table class="table" id="reconcileTable">
                 <thead>
@@ -72,7 +73,8 @@
                 <tbody id="reconcileTbody"></tbody>
             </table>
             <div class="hint mono">
-                Reconcile compares tagged processes vs ledger context.json files and reports discrepancies.
+                <b>ledger_without_process</b> means that the process probably crashed after spawning.
+                See the STDOUT or STDERR for the process to check what might have happened.
             </div>
         </section>
     </main>

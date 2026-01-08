@@ -2,12 +2,14 @@
 // bin/web-ui/serve.ts
 
 import { Command } from "@cliffy/command";
+import { normalize, resolve } from "@std/path";
 import { Hono } from "jsr:@hono/hono@4.11.3";
 import { serveStatic } from "jsr:@hono/hono@4.11.3/deno";
 import { proxy } from "jsr:@hono/hono@4.11.3/proxy";
+import { reconcile, type ReconcileItem } from "../../lib/materialize.ts";
 import { TaggedProcess, taggedProcesses } from "../../lib/spawn.ts";
-import { normalize, resolve } from "@std/path";
-import { reconcile, ReconcileItem } from "../../lib/materialize.ts";
+
+/* ---------------- utilities ---------------- */
 
 function toPosixPath(p: string) {
   return p.replaceAll("\\", "/");
@@ -20,7 +22,6 @@ function stripLeadingSlash(p: string) {
 function safeJoin(rootAbs: string, requestPath: string) {
   const rp = stripLeadingSlash(toPosixPath(requestPath));
   const fullAbs = normalize(resolve(rootAbs, rp));
-
   if (fullAbs === rootAbs) return fullAbs;
   if (!fullAbs.startsWith(rootAbs + "/")) return null;
   return fullAbs;
@@ -57,78 +58,98 @@ function guessContentType(path: string) {
   if (p.endsWith(".png")) return "image/png";
   if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
   if (p.endsWith(".wasm")) return "application/wasm";
-  if (p.endsWith(".db") || p.endsWith(".sqlite") || p.endsWith(".sqlite3")) {
-    return "application/octet-stream";
-  }
   return "application/octet-stream";
 }
 
+/* ---------------- proxy table ---------------- */
+
 function makeProxyTable(processes: TaggedProcess[]) {
-  const table: Array<
-    { prefix: string; upstreamUrl: string; basePath: string }
-  > = [];
+  const table: Array<{ basePath: string; upstreamUrl: string }> = [];
+
+  const normBasePath = (p: string) => {
+    const s = p.trim();
+    if (!s) return "";
+    const withSlash = s.startsWith("/") ? s : `/${s}`;
+    return withSlash.length > 1 ? withSlash.replace(/\/+$/, "") : withSlash;
+  };
 
   for (const p of processes) {
     const upstreamUrl = typeof p.upstreamUrl === "string" ? p.upstreamUrl : "";
     if (!upstreamUrl) continue;
 
-    const ctx = typeof p.contextPath === "string" ? p.contextPath : "";
-    const ctxSeg = ctx.startsWith("/") ? ctx.split("/").filter(Boolean)[0] : "";
+    // Primary, authoritative mapping
+    const pep = typeof p.proxyEndpointPrefix === "string"
+      ? String(p.proxyEndpointPrefix)
+      : "";
+    const basePath = normBasePath(pep);
+    if (basePath) table.push({ basePath, upstreamUrl });
 
-    const candidates = new Set<string>();
-    if (typeof p.serviceId === "string" && p.serviceId.trim()) {
-      candidates.add(p.serviceId.trim());
+    // Backward-compatible fallbacks
+    const sid = typeof p.serviceId === "string" ? p.serviceId.trim() : "";
+    if (sid && !sid.includes("/")) {
+      table.push({ basePath: `/${sid}`, upstreamUrl });
     }
-    if (typeof p.sessionId === "string" && p.sessionId.trim()) {
-      candidates.add(p.sessionId.trim());
-    }
-    if (ctxSeg) candidates.add(ctxSeg);
 
-    for (const prefix of candidates) {
-      table.push({ prefix, upstreamUrl, basePath: `/${prefix}` });
+    const sess = typeof p.sessionId === "string" ? p.sessionId.trim() : "";
+    if (sess && !sess.includes("/")) {
+      table.push({ basePath: `/${sess}`, upstreamUrl });
     }
   }
 
   const seen = new Set<string>();
-  return table.filter((r) =>
-    seen.has(r.prefix) ? false : (seen.add(r.prefix), true)
-  );
+  return table
+    .map((r) => ({
+      ...r,
+      basePath: r.basePath.replace(/\/+$/, "") || "/",
+    }))
+    .filter((r) => seen.has(r.basePath) ? false : (seen.add(r.basePath), true));
 }
+
+/* ---------------- ledger HTML ---------------- */
 
 function htmlEscape(s: string) {
-  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(
-    ">",
-    "&gt;",
-  ).replaceAll('"', "&quot;");
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
-function renderDirListing(
-  params: {
-    mountUrl: string;
-    relPath: string;
-    entries: Array<{ name: string; isDir: boolean; size?: number }>;
-  },
-) {
+function renderDirListing(params: {
+  mountUrl: string;
+  relPath: string;
+  entries: Array<{ name: string; isDir: boolean; size?: number }>;
+}) {
   const { mountUrl, relPath, entries } = params;
   const parts = relPath.split("/").filter(Boolean);
-  const crumbs = [`<a href="${mountUrl}/">ledger.d</a>`].concat(
-    parts.map((p, i) => {
-      const sub = parts.slice(0, i + 1).join("/");
-      return `<a href="${mountUrl}/${sub}">${htmlEscape(p)}</a>`;
-    }),
-  ).join(" / ");
+  const crumbs = [`<a href="${mountUrl}/">ledger.d</a>`]
+    .concat(
+      parts.map((p, i) => {
+        const sub = parts.slice(0, i + 1).join("/");
+        return `<a href="${mountUrl}/${sub}">${htmlEscape(p)}</a>`;
+      }),
+    )
+    .join(" / ");
 
-  const rows = entries.map((e) => {
-    const href = `${mountUrl}/${[relPath, e.name].filter(Boolean).join("/")}`;
-    const label = e.isDir ? `${e.name}/` : e.name;
-    const meta = e.isDir
-      ? "dir"
-      : (typeof e.size === "number" ? `${e.size} bytes` : "file");
-    return `<tr>
-      <td><a href="${href}">${htmlEscape(label)}</a></td>
-      <td class="mono">${htmlEscape(meta)}</td>
-    </tr>`;
-  }).join("");
+  const rows = entries
+    .map((e) => {
+      const href = `${mountUrl}/${
+        [relPath, e.name]
+          .filter(Boolean)
+          .join("/")
+      }`;
+      const label = e.isDir ? `${e.name}/` : e.name;
+      const meta = e.isDir
+        ? "dir"
+        : typeof e.size === "number"
+        ? `${e.size} bytes`
+        : "file";
+      return `<tr>
+        <td><a href="${href}">${htmlEscape(label)}</a></td>
+        <td class="mono">${htmlEscape(meta)}</td>
+      </tr>`;
+    })
+    .join("");
 
   return `<!doctype html>
 <html>
@@ -136,17 +157,9 @@ function renderDirListing(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>db-yard ledger browser</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 16px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    a { color: inherit; }
-    .crumbs { margin-bottom: 12px; }
-  </style>
 </head>
 <body>
-  <div class="crumbs">${crumbs}</div>
+  <div>${crumbs}</div>
   <table>
     <thead><tr><th>Name</th><th>Type/Size</th></tr></thead>
     <tbody>${rows}</tbody>
@@ -154,6 +167,8 @@ function renderDirListing(
 </body>
 </html>`;
 }
+
+/* ---------------- main ---------------- */
 
 async function main() {
   const cmd = await new Command()
@@ -185,7 +200,6 @@ async function main() {
   const port = cmd.options.port;
   const ledgerDir = normalize(resolve(cmd.options.ledgerDir));
   const assetsDir = cmd.options.assetsDir;
-  const refreshMs = cmd.options.refreshMs;
   const proxyEnabled = !cmd.options.proxy;
 
   for (const deps of [ledgerDir, assetsDir]) {
@@ -216,6 +230,9 @@ async function main() {
 
   // Also handle bare /.db-yard without trailing slash
   app.get(`${mount}`, (c) => c.redirect(`${uiMount}/`));
+  app.get(`${mount}/`, (c) => c.redirect(`${uiMount}/`));
+
+  /* ---- assets ---- */
 
   // Assets (served from /.db-yard/asset/*)
   app.get(
@@ -235,9 +252,10 @@ async function main() {
   app.get(`${uiMount}`, (c) => c.redirect(`${uiMount}/`));
   app.get(`${uiMount}/`, async (c) => {
     const indexPath = `${assetsDir}/index.html`;
-    if (!(await exists(indexPath))) return c.text(`Missing ${indexPath}`, 500);
-    const html = await Deno.readTextFile(indexPath);
-    return c.html(html.replace("{{REFRESH_MS}}", String(refreshMs)));
+    if (!(await exists(indexPath))) {
+      return c.text(`Missing ${indexPath}`, 500);
+    }
+    return c.html(await Deno.readTextFile(indexPath));
   });
 
   // Optional convenience: /.db-yard -> /.db-yard/ui/
@@ -254,11 +272,9 @@ async function main() {
     });
   });
 
-  // bin/web-ui/serve.ts (add this new API route near the other API routes)
   app.get(`${apiMount}/reconcile.json`, async (c) => {
     const items: ReconcileItem[] = [];
     const gen = reconcile(ledgerDir);
-
     while (true) {
       const next = await gen.next();
       if (next.done) {
@@ -275,7 +291,6 @@ async function main() {
 
   // Ledger static file browsing (directory listing + file preview)
   app.get(`${ledgerMount}`, (c) => c.redirect(`${ledgerMount}/`));
-
   app.get(`${ledgerMount}/*`, async (c) => {
     const rel = c.req.path.slice((ledgerMount + "/").length);
     const fsPath = safeJoin(ledgerDir, rel);
@@ -330,18 +345,18 @@ async function main() {
   if (proxyEnabled) {
     app.all("*", async (c) => {
       if (c.req.path.startsWith(`${mount}/`)) return c.notFound();
-      if (c.req.path === mount) return c.notFound();
 
       const processes = await Array.fromAsync(taggedProcesses());
       const table = makeProxyTable(processes);
 
       const path = c.req.path;
-      const firstSeg = path.split("/").filter(Boolean)[0] ?? "";
-      const route = table.find((r) => r.prefix === firstSeg);
+      const route = table
+        .filter((r) => path === r.basePath || path.startsWith(r.basePath + "/"))
+        .sort((a, b) => b.basePath.length - a.basePath.length)[0];
 
       if (!route) {
         return c.text(
-          `No upstream mapping for prefix "${firstSeg}". Try ${uiMount}/ to browse running services.`,
+          `No upstream mapping for "${path}". Try ${uiMount}/`,
           502,
         );
       }
@@ -351,7 +366,7 @@ async function main() {
       const proxiedUrl = new URL(rest, target);
       proxiedUrl.search = new URL(c.req.url).search;
 
-      return await proxy(proxiedUrl.toString(), {
+      return proxy(proxiedUrl.toString(), {
         method: c.req.method,
         headers: c.req.raw.headers,
         body: c.req.raw.body,
