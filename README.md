@@ -1,265 +1,307 @@
 ![db-yard Logo](project-hero.png)
 
-`db-yard` is a file-driven process yard for “SQLite DB cargo.” It scans your
-cargo folder, detects which databases are exposable (SQLPage apps and surveilr
-RSSDs), spawns each one as a local web service, writes a durable context JSON +
-logs to disk, and exits. There is no registry and no internal control-plane
-database. The filesystem is the control plane.
+`db-yard` is a file-driven process yard for “SQLite DB cargo.” It treats your
+filesystem as the control plane. You drop databases into a cargo directory, and
+db-yard discovers, classifies, spawns, supervises, and exposes them as local web
+services using deterministic, inspectable state written entirely to disk.
 
-A SQLite file on disk is cargo. Dropping cargo into the yard makes it eligible
-to be launched. The spawned-state directory is the operational ledger: context
-manifests and logs are written to disk so other tools (and later invocations of
-`yard.ts`) can see what is running without needing an API.
+There is no registry, no background daemon requirement, and no internal
+control-plane database. Everything db-yard knows is encoded in files you can
+read, version, copy, audit, or generate tooling around.
 
-Mental model: a “Navy Yard”
+## Core idea
+
+A SQLite file on disk is cargo.
+
+Dropping cargo into the yard makes it eligible to be launched. The spawned-state
+directory is the operational ledger: JSON context manifests and logs are written
+to disk so other tools, scripts, reverse proxies, and later invocations of
+`yard.ts` can see what is running without needing an API.
+
+The filesystem _is_ the API.
+
+## Mental model: a Navy Yard
 
 - The yard is a place where cargo crates get launched as vessels.
 - Databases are cargo crates.
 - Spawned processes are launched vessels.
 - Ports are berths.
-- JSON context files are manifests you can hand to other tools (proxy config
-  generation, status, kill).
+- JSON context files are manifests you can hand to other tools.
+- The spawned-state directory is the ship log.
 
-## What `yard.ts` does today
+This framing is intentional. db-yard is not an app server or orchestrator in the
+Kubernetes sense. It is closer to a dockyard that launches things predictably
+and writes down exactly what it did.
 
-The current CLI is intentionally small and deterministic:
+## What db-yard supports
 
-- `yard.ts start` spawns everything it can find under `./cargo.d`, writes state
-  into `./spawned.d/<timestamp>/...`, then exits.
-- `yard.ts ls` scans `./spawned.d` and prints what it finds (alive/dead, URLs,
-  kind/nature).
-- `yard.ts kill` terminates processes referenced by the spawned-state ledger
-  (optionally removes the ledger).
-- `yard.ts proxy-conf` generates reverse proxy configs (NGINX and/or Traefik)
-  from the spawned-state ledger.
+Today, db-yard focuses on **local-first, deterministic process orchestration**
+for:
 
-This is not a long-running filesystem watcher in the CLI you’re using right now.
-If you want “watch and reconcile continuously,” that’s a separate orchestration
-mode and can be layered on later. The current “materialize then exit” contract
-is deliberate.
+- SQLPage applications stored inside SQLite databases
+- surveilr RSSDs (SQLite databases with `uniform_resource` tables)
 
-How spawning works
+Other tabular formats (DuckDB, Excel, etc.) may be discovered as cargo but are
+not currently exposable services.
 
-1. Discovery `yard.ts start` walks `./cargo.d` (recursively) looking for files
-   that match the default globs used by `tabular()` (for example: `**/*.db`,
-   `**/*.sqlite`, `**/*.sqlite3`, `**/*.sqlite.db`, `**/*.duckdb`, `**/*.xlsx`).
+## High-level workflows
 
-2. Classification Each candidate is classified using lightweight checks:
+db-yard supports three complementary workflows, all using the same underlying
+ledger format.
 
-   - If it’s an SQLite-like file:
+### 1. Materialize and exit
 
-     - If it has table `uniform_resource`, it is treated as a surveilr RSSD and
-       spawned via `surveilr web-ui`.
-     - Else if it has table `sqlpage_files`, it is treated as a SQLPage app and
-       spawned via `sqlpage`.
-     - Else it is treated as plain SQLite (not exposable) and ignored by
-       `exposable()`.
-   - Excel and DuckDB may be detected as tabular suppliers, but they are not
-     exposable services in the current spawn pipeline.
+You scan cargo, spawn everything exposable, write state to disk, and exit.
 
-3. Exposure decision Exposable services are assigned a proxy prefix derived from
-   the file’s path relative to the cargo root. Example:
+This is ideal for:
 
-   - `cargo.d/controls/scf-2025.3.sqlite.db` becomes
-     `/controls/scf-2025.3.sqlite`
-   - `cargo.d/two/example-two.db` becomes `/two/example-two`
+- CI pipelines
+- Deterministic local runs
+- Generating reverse proxy configs
+- One-shot demos or testing
 
-4. Port allocation Ports are assigned incrementally starting at 3000 (in the
-   current defaults).
+Command:
 
-5. Spawning A child process is launched for each exposable service with
-   stdout/stderr redirected to log files, so `yard.ts` can exit cleanly without
-   keeping the event loop alive. Context is written to a JSON manifest file
-   alongside the logs.
-
-6. Spawned-state ledger Every spawned service writes:
-
-   - `<db file>.context.json`
-   - `<db file>.stdout.log`
-   - `<db file>.stderr.log`
-
-Session directories and file layout
-
-Each `yard.ts start` creates a new timestamped session directory inside
-`./spawned.d`.
-
-Example cargo:
-
-```
-cargo.d/
-  controls/scf-2025.3.sqlite.db
-  controls/another.sqlite.db
-  tem.sqlite.db
-  three/example-three.sqlite.db
-  two/example-two.db
+```bash
+bin/yard.ts start
 ```
 
-Example session output:
+### 2. Continuous watch and reconcile
+
+You keep db-yard running. It watches the filesystem and reconciles reality to
+intent.
+
+- New cargo appears → spawn it
+- Cargo disappears → kill it
+- Process dies → respawn it
+
+Command:
+
+```bash
+bin/yard.ts watch
+```
+
+This uses the same spawned-state ledger as materialize mode, just continuously.
+
+### 3. Web UI and admin interface
+
+You can expose:
+
+- A proxy index of running services
+- A JSON admin endpoint
+- A browsable admin UI
+- Logs and context files
+- Optional unsafe SQL endpoints (explicitly marked)
+
+All served on the same port, alongside proxied services.
+
+This is layered _on top of_ the spawned-state ledger and watcher logic.
+
+## Discovery and classification
+
+### Discovery
+
+db-yard recursively walks one or more cargo roots using the same rules as
+`tabular()`.
+
+Typical globs include:
+
+- `**/*.db`
+- `**/*.sqlite`
+- `**/*.sqlite3`
+- `**/*.sqlite.db`
+- `**/*.duckdb`
+- `**/*.xlsx`
+
+### Classification
+
+Each candidate file is classified cheaply and deterministically:
+
+- If it is SQLite-like:
+  - If it has table `uniform_resource`, it is a surveilr RSSD and spawned via
+    `surveilr web-ui`
+  - Else if it has table `sqlpage_files`, it is a SQLPage app and spawned via
+    `sqlpage`
+  - Else it is plain SQLite and ignored by `exposable()`
+- Non-SQLite tabular files may be discovered but are not exposable services
+  today
+
+No heuristics beyond this. No magic.
+
+## Proxy prefix assignment
+
+Each exposable service is assigned a proxy prefix derived from its path
+**relative to the cargo root**.
+
+Examples:
+
+- `cargo.d/controls/scf-2025.3.sqlite.db` → `/controls/scf-2025.3.sqlite`
+- `cargo.d/two/example-two.db` → `/two/example-two`
+
+This prefix is:
+
+- Passed to the spawned service
+- Written into the context JSON
+- Used by the web UI
+- Used by reverse proxy config generators
+
+The same prefix flows through the entire system.
+
+## Port allocation
+
+Ports are assigned incrementally, starting at a configurable base (default:
+3000).
+
+In watch mode, db-yard avoids port collisions by:
+
+- Reading the existing ledger
+- Skipping ports already bound by live PIDs
+
+This keeps restarts stable and predictable.
+
+## Spawned-state ledger
+
+Every spawned service writes three files:
+
+- `<name>.context.json`
+- `<name>.stdout.log`
+- `<name>.stderr.log`
+
+These files live under a session directory inside the spawn-state home.
+
+### Session directories
+
+Materialize mode (`start`) creates a timestamped session directory:
 
 ```
 spawned.d/2026-01-07-20-15-00/
-  tem.sqlite.db.context.json
-  tem.sqlite.db.stdout.log
-  tem.sqlite.db.stderr.log
+```
 
+Watch mode and web UI use a **stable session directory** (by default `active/`)
+so state is continuously reconciled instead of replaced.
+
+### Mirrored layout
+
+Session directories mirror the cargo directory structure:
+
+```
+spawned.d/2026-01-07-20-15-00/
   controls/
     scf-2025.3.sqlite.db.context.json
     scf-2025.3.sqlite.db.stdout.log
     scf-2025.3.sqlite.db.stderr.log
-    another.sqlite.db.context.json
-    another.sqlite.db.stdout.log
-    another.sqlite.db.stderr.log
-
-  three/
-    example-three.sqlite.db.context.json
-    example-three.sqlite.db.stdout.log
-    example-three.sqlite.db.stderr.log
-
   two/
     example-two.db.context.json
     example-two.db.stdout.log
     example-two.db.stderr.log
 ```
 
-A key point: the session subdirectories mirror your cargo folder layout. This
-makes it easy to correlate a service back to its source file and keeps large
-cargo trees readable.
+This makes it trivial to trace a running service back to its source file.
 
-CLI overview (current yard.ts)
+## CLI overview
+
+### Start (materialize)
 
 ```bash
-# start everything exposable under ./cargo.d, write state into ./spawned.d, then exit
-bin/yard.ts start [--verbose essential|comprehensive] [--summarize] [--no-ls]
+bin/yard.ts start --cargo-home ./cargo.d --spawn-state-home ./spawned.d --verbose essential|comprehensive --summarize
+```
 
-# list what the spawned-state ledger says exists (alive/dead, upstream URL, kind/nature)
+### Watch (continuous reconcile)
+
+```bash
+bin/yard.ts watch --cargo-home ./cargo.d --spawn-state-home ./spawned.d --active-dir-name active --debounce-ms 250 --reconcile-every-ms 0
+```
+
+### List
+
+```bash
 bin/yard.ts ls
-
-# kill processes referenced by the spawned-state ledger
-bin/yard.ts kill [--clean]
-
-# generate reverse proxy configs from spawned-state ledger
-bin/yard.ts proxy-conf [options]
-
-# helpers
-bin/yard.ts help
-bin/yard.ts completions
 ```
 
-Verbosity
-
-`start` accepts an enum `--verbose`:
-
-- `--verbose essential` prints lifecycle events without the full detail stream.
-- `--verbose comprehensive` prints full discovery/spawn/context/probe details.
-- omit `--verbose` to run quietly (no event stream).
-
-Examples:
-
-```bash
-bin/yard.ts start
-bin/yard.ts start --verbose essential
-bin/yard.ts start --verbose comprehensive --summarize
-```
-
-Listing processes
-
-`yard.ts ls` reads the spawned-state ledger and prints one line per context
-file, including:
-
-- PID and whether it is alive
-- the upstream URL (base URL + proxy prefix)
-- service kind and supplier nature (for example: `sqlpage/embedded`,
-  `surveilr/embedded`)
-
-Example output:
-
-- 🟢 [123400]
-  [http://127.0.0.1:3000/controls/scf-2025.3.sqlite](http://127.0.0.1:3000/controls/scf-2025.3.sqlite)
-  (sqlpage/embedded)
-- 🔴 [123406 (dead)]
-  [http://127.0.0.1:3001/controls/another.sqlite](http://127.0.0.1:3001/controls/another.sqlite)
-  (sqlpage/embedded)
-
-Killing processes
-
-`yard.ts kill` terminates processes referenced by the spawned-state ledger.
-
-- Without `--clean`, it kills what it can and then you can run `yard.ts ls` to
-  see what’s still alive.
-- With `--clean`, it removes `./spawned.d` after killing.
+### Kill
 
 ```bash
 bin/yard.ts kill
 bin/yard.ts kill --clean
 ```
 
-Reverse proxy configuration
-
-`yard.ts proxy-conf` generates NGINX and/or Traefik configs by reading the
-spawned-state ledger (context JSON files). This is the “filesystem is the API”
-story in action: the context files already contain everything needed to route
-traffic.
-
-Common usage patterns:
-
-Emit nginx config to stdout (default):
+### Reverse proxy config generation
 
 ```bash
 bin/yard.ts proxy-conf --type nginx
+bin/yard.ts proxy-conf --type traefik
+bin/yard.ts proxy-conf --type both
 ```
 
-Write nginx configs to a directory:
+Supported options include:
 
-```bash
-bin/yard.ts proxy-conf --type nginx --nginx-out ./out/nginx
+- `--include-dead`
+- `--location-prefix`
+- `--strip-prefix`
+- nginx-specific flags
+- traefik-specific flags
+
+## Web UI
+
+The web UI is optional and layered on top of watch mode.
+
+Endpoints:
+
+- `/` proxy index
+- `/.admin` JSON runtime state
+- `/.admin/index.html` admin UI
+- `/.admin/files/...` logs and context files
+- `/.web-ui/...` static UI assets
+- All other paths → proxied services
+
+The web UI runs on the same port as proxied services by design.
+
+## Unsafe SQL endpoint
+
+For development and debugging only:
+
+```http
+POST /SQL/unsafe/<id>.json
+{
+  "sql": "select * from sqlite_master"
+}
 ```
 
-Write traefik configs to a directory:
+This is intentionally labeled unsafe and should never be exposed publicly.
 
-```bash
-bin/yard.ts proxy-conf --type traefik --traefik-out ./out/traefik
-```
+## Operational philosophy
 
-Write both:
+db-yard is built around a few strong constraints:
 
-```bash
-bin/yard.ts proxy-conf --type both \
-  --nginx-out ./out/nginx \
-  --traefik-out ./out/traefik
-```
+- Files, not APIs
+- Deterministic behavior
+- Zero hidden state
+- Easy integration via inspection
+- Killable, restartable, auditable processes
 
-Important options you can use (as implemented in the updated `yard.ts`):
+If something goes wrong, you should be able to:
 
-- `--include-dead` include dead PIDs when generating configs (default is to only
-  include live ones, depending on generator behavior)
-- `--location-prefix <prefix>` override the proxy prefix for all services
-- `--strip-prefix` enable prefix-stripping middleware/rewrite
-- nginx-specific:
+- Open a JSON file
+- Read a log
+- Kill a PID
+- Rerun a command
 
-  - `--server-name <name>` (default `_`)
-  - `--listen <listen>` (default `80`)
-  - `--nginx-extra <text>` extra snippet appended into server block
-- traefik-specific:
+No control-plane archaeology required.
 
-  - `--entrypoints <csv>` (default `web`)
-  - `--rule <rule>` router rule override
-  - `--traefik-extra <text>` extra yaml appended at end
+## Who this is for
 
-Notes for SQLPage and surveilr behind a proxy
+db-yard is ideal for:
 
-db-yard spawns services with a “site prefix” concept so that apps can behave
-correctly when mounted behind a reverse proxy. The proxy prefix is derived from
-the cargo-relative path (unless overridden). When you generate proxy configs,
-you are basically publishing that same prefix at your reverse proxy layer.
+- Engineers who prefer local-first workflows
+- Tooling authors who want inspectable state
+- SQLPage and surveilr users
+- CI systems that need deterministic spawning
+- Reverse proxy generation pipelines
+- Teams allergic to background daemons
 
-Operational ledger as the contract
+## Summary
 
-The spawned-state directory is the contract between:
+db-yard is intentionally boring in the best way possible.
 
-- spawning (materialize/start)
-- inspection (ls)
-- cleanup (kill)
-- reverse proxy generation (proxy-conf)
-
-No shared memory, no background daemon required. If a tool can read files, it
-can integrate with db-yard.
+If you understand files, processes, ports, and logs, you already understand
+db-yard.
