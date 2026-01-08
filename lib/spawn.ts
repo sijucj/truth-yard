@@ -10,8 +10,7 @@ import {
   type SpawnHost,
   type SpawnLogTarget,
 } from "./exposable.ts";
-import { ensureParentDir } from "./fs.ts";
-import { joinUrl, safeRelFromRoot } from "./path.ts";
+import { ensureParentDir, joinUrl, safeRelFromRoot } from "./path.ts";
 import { tabular, TabularDataSupplier } from "./tabular.ts";
 
 export type SpawnLedgerNature = "context" | "stdout" | "stderr";

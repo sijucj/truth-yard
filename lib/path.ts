@@ -1,5 +1,11 @@
 // lib/path.ts
-import { basename, extname, relative } from "@std/path";
+import { ensureDir } from "@std/fs";
+import { basename, dirname, extname, relative } from "@std/path";
+
+export async function ensureParentDir(filePath: string): Promise<void> {
+  const dir = dirname(filePath);
+  if (dir && dir !== "." && dir !== "/") await ensureDir(dir);
+}
 
 export function normalizeSlash(p: string): string {
   return p.replaceAll("\\", "/").replaceAll(/\/+/g, "/");
@@ -61,6 +67,45 @@ export function proxyPrefixFromRel(relFromRoot: string): string {
     /\/+/g,
     "/",
   );
+}
+
+function bestRootForFile(
+  fileAbs: string,
+  rootsAbs: readonly string[],
+): string | undefined {
+  const candidates = rootsAbs
+    .filter((r) => fileAbs === r || fileAbs.startsWith(r + "/"))
+    .sort((a, b) => b.length - a.length);
+  return candidates[0];
+}
+
+export function relFromRoots(
+  fileAbs: string,
+  rootsAbs: readonly string[],
+): string {
+  const root = bestRootForFile(fileAbs, rootsAbs);
+  if (!root) return basename(fileAbs);
+
+  let rel = relative(root, fileAbs);
+  rel = normalizeSlash(rel).replaceAll(/^\.\//g, "");
+
+  // Defensive: strip root-name prefix if it leaks into rel.
+  const rootName = basename(root);
+  const prefix = `${rootName}/`;
+  if (rel.startsWith(prefix)) rel = rel.slice(prefix.length);
+
+  if (!rel || rel.startsWith("..")) return basename(fileAbs);
+  return rel;
+}
+
+export function relDirFromRoots(
+  fileAbs: string,
+  rootsAbs: readonly string[],
+): string {
+  const rel = relFromRoots(fileAbs, rootsAbs);
+  const d = dirname(rel);
+  if (d === "." || d === "/" || d.trim() === "") return "";
+  return normalizeSlash(d).replaceAll(/\/+$/g, "");
 }
 
 /**

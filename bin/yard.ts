@@ -3,12 +3,12 @@
 import { Command, EnumType } from "@cliffy/command";
 import { CompletionsCommand } from "@cliffy/completions";
 import { HelpCommand } from "@cliffy/help";
-import { cyan, dim, green, red, yellow } from "@std/fmt/colors";
+import { blue, cyan, dim, green, red, yellow } from "@std/fmt/colors";
 import { materialize, spawnedLedgerStates } from "../lib/materialize.ts";
 import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
 import { killSpawnedProcesses, taggedProcesses } from "../lib/spawn.ts";
 
-export async function lsSpawnedStates(
+export async function lsLedgers(
   spawnStateHomeOrSessionHome: string,
 ): Promise<void> {
   for await (const state of spawnedLedgerStates(spawnStateHomeOrSessionHome)) {
@@ -39,57 +39,64 @@ export async function lsProcesses(
 ): Promise<void> {
   const extended = opts.extended === true;
 
+  const kv = (key: string, value: unknown) => {
+    const v = value == null || value === "" ? "(none)" : String(value);
+    return `  ${dim(key)}: ${blue(v)}`;
+  };
+
+  const issueToString = (issue: unknown): string => {
+    if (!issue) return "";
+    if (issue instanceof AggregateError) {
+      const parts = issue.errors.map((e) =>
+        e instanceof Error ? e.message : String(e)
+      );
+      return parts.join(" | ");
+    }
+    if (issue instanceof Error) return issue.message;
+    return String(issue);
+  };
+
   for await (const p of taggedProcesses()) {
     const pidLabel = green(String(p.pid));
 
-    const kind = p.context?.service?.kind ?? "unknown";
+    const kind = p.context?.service?.kind ?? p.kind ?? "unknown";
     const nature = p.context?.supplier?.nature ?? "unknown";
 
     const kindLabel = cyan(kind);
     const natureLabel = dim(nature);
 
-    const upstreamUrl = p.context
-      ? p.context.service.upstreamUrl
-      : "(no context)";
+    const upstreamUrl = p.context?.service?.upstreamUrl ??
+      p.upstreamUrl ??
+      "(no context)";
 
     const urlLabel = yellow(upstreamUrl);
 
     console.log(
-      `🟢 [${pidLabel}] ${urlLabel} ${dim("(")}${kindLabel}${
-        dim("/")
-      }${natureLabel}${dim(")")}`,
+      `${extended ? "" : "🟢 "}[${pidLabel}] ${urlLabel} ${
+        dim("(")
+      }${kindLabel}${dim("/")}${natureLabel}${dim(")")}`,
     );
 
     if (!extended) continue;
 
-    const extras: string[] = [];
+    const issueStr = issueToString(p.issue);
 
-    if (p.issue) {
-      if (p.issue instanceof AggregateError) {
-        extras.push(
-          `issue=${
-            p.issue.errors.map((e) =>
-              e instanceof Error ? e.message : String(e)
-            ).join(" | ")
-          }`,
-        );
-      } else if (p.issue instanceof Error) {
-        extras.push(`issue=${p.issue.message}`);
-      } else {
-        extras.push(`issue=${String(p.issue)}`);
-      }
-    }
-
-    if (p.sessionId) extras.push(`sessionId=${p.sessionId}`);
-    if (p.serviceId) extras.push(`serviceId=${p.serviceId}`);
-    if (p.contextPath) extras.push(`contextPath=${p.contextPath}`);
-    if (p.cmdline) extras.push(`cmdline=${p.cmdline}`);
-
-    if (extras.length > 0) {
-      console.log(dim(`  ${extras.join("  ")}`));
-    } else {
-      console.log(dim(`  (no extra details)`));
-    }
+    // Extended: one essential field per line as "  <key>: <value>"
+    console.log(kv("provenance", p.provenance));
+    console.log(kv("sessionId", p.sessionId));
+    console.log(kv("serviceId", p.serviceId));
+    console.log(kv("kind", p.kind ?? p.context?.service?.kind));
+    console.log(kv("label", p.label ?? p.context?.service?.label));
+    console.log(
+      kv(
+        "proxyEndpointPrefix",
+        p.proxyEndpointPrefix ?? p.context?.service?.proxyEndpointPrefix,
+      ),
+    );
+    console.log(kv("upstreamUrl", upstreamUrl));
+    console.log(kv("contextPath", p.contextPath));
+    console.log(kv("cmdline", p.cmdline));
+    if (issueStr) console.log(kv("issue", issueStr));
   }
 }
 
@@ -167,7 +174,7 @@ await new Command()
     { default: defaultSpawnStateHome },
   )
   .action(async ({ spawnStateHome }) => {
-    await lsSpawnedStates(spawnStateHome);
+    await lsLedgers(spawnStateHome);
   })
   .command("ps", `List Linux tagged processes`)
   .option("-e, --extended", `Show provenance details`)
@@ -242,10 +249,8 @@ await new Command()
     } as const;
 
     await generateReverseProxyConfsFromSpawnedStates({
-      spawnStateHome: o.spawnStateHome,
       nginxConfHome: wantNginx ? o.nginxOut : undefined,
       traefikConfHome: wantTraefik ? o.traefikOut : undefined,
-      includeDead: o.includeDead ? true : undefined,
       verbose: o.verbose ? true : undefined,
       overrides,
     });
@@ -265,7 +270,7 @@ await new Command()
     if (clean) {
       Deno.remove(spawnStateHome, { recursive: true }).catch(() => undefined);
     } else {
-      await lsSpawnedStates(spawnStateHome);
+      await lsLedgers(spawnStateHome);
     }
   })
   .command("help", new HelpCommand())

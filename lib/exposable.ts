@@ -1,11 +1,11 @@
 // lib/exposable.ts
 import { resolve } from "@std/path";
-import { ensureParentDir } from "./fs.ts";
 import type {
   SqlPageDataSupplier,
   SurveilrDataSupplier,
   TabularDataSupplier,
 } from "./tabular.ts";
+import { ensureParentDir } from "./path.ts";
 
 /**
  * Identifies the process that is acting as the "host" for spawned services.
