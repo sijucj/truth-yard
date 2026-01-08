@@ -45,19 +45,21 @@
                 <tbody id="procTbody"></tbody>
             </table>
             <div class="hint mono">
-                Proxy behavior: any request whose first URL segment matches a serviceId/sessionId/contextPath prefix
+                Proxy behavior: request whose first URL segment matches a serviceId/sessionId/contextPath prefix
                 will be proxied.
-                Example: /yourServiceId/anything → upstreamUrl/anything
+                Example: /yourServiceId/anything → upstreamUrl/anything (requests are matched by longest
+                proxyEndpointPrefix)
             </div>
         </section>
 
         <section class="status" style="margin-top: 16px;">
             <div class="controls">
                 <button id="reconcileBtn">Run reconcile</button>
+                <button id="proxyTableBtn">Load proxy table</button>
+                <button id="healthBtn">Run health checks</button>
             </div>
         </section>
 
-        Reconcile compares tagged processes vs ledger context.json files and reports discrepancies.
         <section class="card">
             <table class="table" id="reconcileTable">
                 <thead>
@@ -73,8 +75,50 @@
                 <tbody id="reconcileTbody"></tbody>
             </table>
             <div class="hint mono">
-                <b>ledger_without_process</b> means that the process probably crashed after spawning.
+                ledger_without_process means that the process probably crashed after spawning.
                 See the STDOUT or STDERR for the process to check what might have happened.
+            </div>
+        </section>
+
+        <section class="status" style="margin-top: 16px;">
+            <div class="controls">
+                <label class="mono">
+                    Resolve proxy path
+                    <input id="resolveInput" type="text" placeholder="/controls/scf-2025.3" style="width: 360px;" />
+                </label>
+                <button id="resolveBtn">Resolve</button>
+            </div>
+        </section>
+
+        <section class="card">
+            <table class="table" id="proxyTable">
+                <thead>
+                    <tr>
+                        <th>basePath</th>
+                        <th>upstreamUrl</th>
+                    </tr>
+                </thead>
+                <tbody id="proxyTbody"></tbody>
+            </table>
+            <div class="hint mono" id="proxyConflictsText">Proxy conflicts: (not loaded)</div>
+        </section>
+
+        <section class="card" style="margin-top: 16px;">
+            <table class="table" id="healthTable">
+                <thead>
+                    <tr>
+                        <th>basePath</th>
+                        <th>upstreamUrl</th>
+                        <th>ok</th>
+                        <th>status</th>
+                        <th>ms</th>
+                        <th>error</th>
+                    </tr>
+                </thead>
+                <tbody id="healthTbody"></tbody>
+            </table>
+            <div class="hint mono">
+                Health checks fetch each upstreamUrl with a short timeout and reports status.
             </div>
         </section>
     </main>

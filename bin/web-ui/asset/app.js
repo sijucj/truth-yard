@@ -8,6 +8,16 @@ const reconcileStatusText = document.getElementById("reconcileStatusText");
 const reconcileTbody = document.getElementById("reconcileTbody");
 const reconcileBtn = document.getElementById("reconcileBtn");
 
+const proxyTableBtn = document.getElementById("proxyTableBtn");
+const proxyTbody = document.getElementById("proxyTbody");
+const proxyConflictsText = document.getElementById("proxyConflictsText");
+
+const resolveInput = document.getElementById("resolveInput");
+const resolveBtn = document.getElementById("resolveBtn");
+
+const healthBtn = document.getElementById("healthBtn");
+const healthTbody = document.getElementById("healthTbody");
+
 let lastPayload = null;
 
 function esc(s) {
@@ -26,6 +36,7 @@ function matchesFilter(p, q) {
         p.serviceId,
         p.sessionId,
         p.contextPath,
+        p.proxyEndpointPrefix,
         p._sourceFile,
     ].map((x) => String(x ?? "")).join(" ").toLowerCase();
     return hay.includes(q.toLowerCase());
@@ -60,7 +71,7 @@ function deriveLogRel(relContextJson, which /* "stdout" | "stderr" */) {
     return rel + suffix;
 }
 
-function render(payload) {
+function renderProcesses(payload) {
     lastPayload = payload;
     const { taggedProcesses, ledgerDir, now, count } = payload;
     const q = filterInput.value.trim();
@@ -115,7 +126,7 @@ function render(payload) {
 }
 
 function renderReconcile(payload) {
-    const { now, ledgerDir, summary, items } = payload;
+    const { now, ledgerDir, summary, items, proxyConflicts } = payload;
     const ok = summary?.processWithoutLedger === 0 &&
         summary?.ledgerWithoutProcess === 0;
 
@@ -163,44 +174,136 @@ function renderReconcile(payload) {
     `;
         reconcileTbody.appendChild(tr);
     }
+
+    if (Array.isArray(proxyConflicts) && proxyConflicts.length) {
+        proxyConflictsText.textContent =
+            `Proxy conflicts: ${proxyConflicts.length} (also shown in proxy table)`;
+    }
 }
 
-async function refresh() {
+function renderProxyTable(payload) {
+    const { proxyTable, proxyConflicts } = payload;
+    proxyTbody.innerHTML = "";
+
+    for (const r of (proxyTable || [])) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+      <td class="mono">${esc(r.basePath)}</td>
+      <td class="mono"><a href="${esc(r.upstreamUrl)}" target="_blank" rel="noreferrer">${esc(r.upstreamUrl)}</a></td>
+    `;
+        proxyTbody.appendChild(tr);
+    }
+
+    if (Array.isArray(proxyConflicts) && proxyConflicts.length) {
+        const lines = proxyConflicts.map((c) =>
+            `${c.basePath} -> ${c.upstreamUrls.join(" | ")}`
+        );
+        proxyConflictsText.textContent = `Proxy conflicts (${proxyConflicts.length}): ${lines.join("; ")}`;
+    } else {
+        proxyConflictsText.textContent = "Proxy conflicts: none";
+    }
+}
+
+function renderHealth(payload) {
+    const { results } = payload;
+    healthTbody.innerHTML = "";
+
+    for (const r of (results || [])) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+      <td class="mono">${esc(r.basePath)}</td>
+      <td class="mono"><a href="${esc(r.upstreamUrl)}" target="_blank" rel="noreferrer">${esc(r.upstreamUrl)}</a></td>
+      <td class="mono">${esc(r.ok)}</td>
+      <td class="mono">${esc(r.status ?? "")}</td>
+      <td class="mono">${esc(r.ms ?? "")}</td>
+      <td class="mono">${esc(r.error ?? "")}</td>
+    `;
+        healthTbody.appendChild(tr);
+    }
+}
+
+async function refreshProcesses() {
     try {
         procStatusText.textContent = "Processes: loading…";
-        const res = await fetch("/.db-yard/api/tagged-processes.json", {
-            cache: "no-store",
-        });
+        const res = await fetch("/.db-yard/api/tagged-processes.json", { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const payload = await res.json();
-        render(payload);
+        renderProcesses(payload);
     } catch (e) {
         procStatusText.textContent = `Processes: failed to load: ${e?.message ?? e}`;
-        if (lastPayload) render(lastPayload);
+        if (lastPayload) renderProcesses(lastPayload);
     }
 }
 
 async function runReconcile() {
     try {
         reconcileStatusText.textContent = "Reconcile: running…";
-        const res = await fetch("/.db-yard/api/reconcile.json", {
-            cache: "no-store",
-        });
+        const res = await fetch("/.db-yard/api/reconcile.json", { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const payload = await res.json();
         renderReconcile(payload);
     } catch (e) {
-        reconcileStatusText.textContent =
-            `Reconcile: failed: ${e?.message ?? e}`;
+        reconcileStatusText.textContent = `Reconcile: failed: ${e?.message ?? e}`;
     }
 }
 
-refreshBtn.addEventListener("click", refresh);
+async function loadProxyTable() {
+    try {
+        proxyConflictsText.textContent = "Proxy conflicts: loading…";
+        const res = await fetch("/.db-yard/api/proxy-table.json", { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        renderProxyTable(payload);
+    } catch (e) {
+        proxyConflictsText.textContent = `Proxy conflicts: failed: ${e?.message ?? e}`;
+    }
+}
+
+async function resolveProxy() {
+    const p = (resolveInput.value || "").trim();
+    if (!p) return;
+
+    try {
+        const res = await fetch(`/.db-yard/api/proxy-resolve.json?path=${encodeURIComponent(p)}`, {
+            cache: "no-store",
+        });
+        const payload = await res.json();
+
+        if (!payload.ok) {
+            alert(`No match for ${p}`);
+            return;
+        }
+
+        alert(
+            `matchBasePath=${payload.matchBasePath}\nupstreamUrl=${payload.upstreamUrl}\nproxiedUrl=${payload.proxiedUrl}`,
+        );
+    } catch (e) {
+        alert(`Resolve failed: ${e?.message ?? e}`);
+    }
+}
+
+async function runHealth() {
+    try {
+        const res = await fetch("/.db-yard/api/health.json?timeoutMs=1500&max=50", {
+            cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        renderHealth(payload);
+    } catch (e) {
+        alert(`Health checks failed: ${e?.message ?? e}`);
+    }
+}
+
+refreshBtn.addEventListener("click", refreshProcesses);
 filterInput.addEventListener("input", () => {
-    if (lastPayload) render(lastPayload);
+    if (lastPayload) renderProcesses(lastPayload);
 });
 reconcileBtn.addEventListener("click", runReconcile);
+proxyTableBtn.addEventListener("click", loadProxyTable);
+resolveBtn.addEventListener("click", resolveProxy);
+healthBtn.addEventListener("click", runHealth);
 
-// run both on start
-refresh();
+// run reconcile on start (and processes)
+refreshProcesses();
 runReconcile();
