@@ -2,7 +2,7 @@
 import { basename, dirname, extname, relative } from "@std/path";
 
 export function normalizeSlash(p: string): string {
-  return p.replaceAll("\\", "/").replaceAll(/\/+/g, "/");
+  return String(p ?? "").replaceAll("\\", "/").replaceAll(/\/+/g, "/");
 }
 
 export function stripOneExt(p: string): string {
@@ -11,7 +11,7 @@ export function stripOneExt(p: string): string {
 }
 
 export function normalizePathForUrl(path: string): string {
-  const p = normalizeSlash(String(path ?? "")).trim();
+  const p = normalizeSlash(path).trim();
   if (!p) return "/";
   if (!p.startsWith("/")) return `/${p}`;
   return p;
@@ -60,8 +60,10 @@ export function bestRootForFile(
   fileAbs: string,
   rootsAbs: readonly string[],
 ): string | undefined {
+  const f = normalizeSlash(fileAbs);
   const candidates = rootsAbs
-    .filter((r) => fileAbs === r || fileAbs.startsWith(`${normalizeSlash(r)}/`))
+    .map((r) => normalizeSlash(r))
+    .filter((r) => f === r || f.startsWith(`${r}/`))
     .sort((a, b) => b.length - a.length);
   return candidates[0];
 }
@@ -76,7 +78,6 @@ export function relFromRoots(
   let rel0 = relative(root, fileAbs);
   rel0 = normalizeSlash(rel0).replaceAll(/^\.\//g, "");
 
-  // Defensive guard: if rel still includes the root dir name, strip that segment.
   const rootName = basename(root);
   const prefix = `${rootName}/`;
   if (rel0.startsWith(prefix)) rel0 = rel0.slice(prefix.length);

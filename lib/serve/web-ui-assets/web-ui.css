@@ -1,0 +1,111 @@
+/* lib/serve/web-ui-assets/web-ui.css */
+:root {
+  --fg: #111;
+  --muted: #666;
+  --bg: #fff;
+  --card: #fafafa;
+  --border: #ddd;
+  --border2: #eee;
+  --link: #0645ad;
+  --mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 18px;
+  color: var(--fg);
+  background: var(--bg);
+  font-family: var(--mono);
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+header {
+  margin-bottom: 14px;
+}
+.title {
+  font-size: 14px;
+}
+.sub {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+.sep {
+  margin: 0 6px;
+}
+
+main {
+  display: grid;
+  gap: 14px;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  padding: 12px;
+}
+
+.card-h {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.muted {
+  color: var(--muted);
+}
+
+.grid {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1.6fr 1.0fr 0.5fr 0.9fr 0.5fr;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border2);
+}
+
+.row:first-child {
+  border-top: none;
+}
+.row.head {
+  background: #f3f3f3;
+  font-weight: 600;
+}
+
+.c {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.c-pid {
+  text-align: right;
+}
+
+.events {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  overflow: auto;
+  max-height: 280px;
+  font-size: 12px;
+  line-height: 1.35;
+}
