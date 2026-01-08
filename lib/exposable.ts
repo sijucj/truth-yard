@@ -1,6 +1,6 @@
 // lib/exposable.ts
-import { ensureDir } from "@std/fs";
-import { basename, dirname } from "@std/path";
+import { basename } from "@std/path";
+import { ensureParentDir } from "./fs.ts";
 import type {
   SqlPageDataSupplier,
   SurveilrDataSupplier,
@@ -63,11 +63,6 @@ export type SpawnedProcess = Readonly<{
 }>;
 
 /* -------------------------------- helpers -------------------------------- */
-
-async function ensureParentDir(filePath: string): Promise<void> {
-  const dir = dirname(filePath);
-  if (dir && dir !== "." && dir !== "/") await ensureDir(dir);
-}
 
 function shQuote(s: string): string {
   // POSIX shell single-quote escaping: ' -> '\''.
@@ -164,8 +159,6 @@ export async function spawnPlan(
     },
   };
 }
-
-/* (rest of your file unchanged) */
 
 /**
  * Base init shared across all exposable services.

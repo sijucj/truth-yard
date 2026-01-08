@@ -1,4 +1,4 @@
-// tabular.ts
+// lib/tabular.ts
 import { basename, extname } from "@std/path";
 import { type WalkEntry } from "@std/fs";
 

@@ -1,4 +1,4 @@
-// discover.ts
+// lib/discover.ts
 import { walk, type WalkEntry, type WalkOptions } from "@std/fs";
 import { globToRegExp, relative } from "@std/path";
 

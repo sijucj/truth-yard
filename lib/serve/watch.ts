@@ -7,12 +7,15 @@ import {
   type ExposableService,
   type ExposableServiceConf,
 } from "../exposable.ts";
+import type { SpawnedStateEncounter } from "../materialize.ts";
+import { spawnedStates } from "../materialize.ts";
 import {
+  isPidAlive,
   killPID,
-  type SpawnedStateEncounter,
-  spawnedStates,
-} from "../materialize.ts";
-import { spawn, type SpawnEventListener, type SpawnOptions } from "../spawn.ts";
+  spawn,
+  type SpawnEventListener,
+  type SpawnOptions,
+} from "../spawn.ts";
 import { tabular } from "../tabular.ts";
 
 export type WatchEvent =
@@ -105,10 +108,7 @@ export type WatchOptions = Readonly<{
   onWatchEvent?: (event: WatchEvent) => void | Promise<void>;
 }>;
 
-async function emit(
-  opts: WatchOptions,
-  event: WatchEvent,
-): Promise<void> {
+async function emit(opts: WatchOptions, event: WatchEvent): Promise<void> {
   const fn = opts.onWatchEvent;
   if (!fn) return;
   try {
@@ -123,7 +123,6 @@ function isAborted(signal: AbortSignal | undefined): boolean {
 }
 
 function safeWatcherEventKind(e: Deno.FsEvent): string {
-  // Deno.FsEvent.kind is a string union; keep it as a string for logging.
   return String((e as { kind?: unknown }).kind ?? "unknown");
 }
 
@@ -134,7 +133,6 @@ function safePathsFromEvent(e: Deno.FsEvent): string[] {
 }
 
 function serviceKey(service: ExposableService): string {
-  // Spawn pipeline uses service.id as the canonical id and that is persisted.
   return service.id;
 }
 
@@ -158,15 +156,6 @@ async function readLedger(
     out.set(id, st);
   }
   return out;
-}
-
-function isPidAliveNow(pid: number): boolean {
-  try {
-    Deno.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -193,7 +182,7 @@ function pickNextPortStart(
     const p = Number(st?.context?.listen?.port);
     if (Number.isFinite(p) && p > 0) {
       const alive = Number.isFinite(st.pid) && st.pid > 0
-        ? isPidAliveNow(st.pid)
+        ? isPidAlive(st.pid)
         : false;
       if (alive) used.add(p);
     }
@@ -223,8 +212,6 @@ async function spawnMissing(
     const id = serviceKey(entry);
     if (!toSpawn.has(id)) return false;
 
-    // Keep proxy prefix deterministic. Use the candidate from spawn() defaulting.
-    // If you want stricter stability, consider adding an option to override this.
     const proxyEndpointPrefix = proxyEndpointPrefixCandidate;
 
     return {
@@ -302,7 +289,7 @@ async function reconcileOnce(
   for (const [id, st] of ledger) {
     const loc = String(st?.context?.supplier?.location ?? "");
     const pid = Number(st?.pid);
-    const alive = Number.isFinite(pid) && pid > 0 ? isPidAliveNow(pid) : false;
+    const alive = Number.isFinite(pid) && pid > 0 ? isPidAlive(pid) : false;
 
     const isStillDiscovered = discovered.has(id);
 
@@ -343,7 +330,7 @@ async function reconcileOnce(
       continue;
     }
     const pid = Number(st?.pid);
-    const alive = Number.isFinite(pid) && pid > 0 ? isPidAliveNow(pid) : false;
+    const alive = Number.isFinite(pid) && pid > 0 ? isPidAlive(pid) : false;
     if (!alive) toSpawn.add(id);
   }
 
@@ -416,7 +403,6 @@ export async function watchYard(
           reconcileRunning = undefined;
           if (reconcileQueued && !isAborted(signal)) {
             reconcileQueued = false;
-            // subsequent runs after coalescing are treated as fs-triggered if any were queued
             schedule();
           }
         }
@@ -512,18 +498,3 @@ export async function watchYard(
     }
   }
 }
-
-/*
-Suggestions for minor exports to reduce duplication / improve stability:
-
-1) materialize.ts has useful, tested path logic for mapping supplier.location to a
-   stable proxy prefix and hierarchical state paths. None of that is exported.
-   Consider exporting small helpers such as:
-   - proxyPrefixFromRel(relFromRoot: string)
-   - relFromRoots(fileAbs: string, rootsAbs: readonly string[])
-   - a reusable spawnStatePath factory
-
-2) exposable.ts uses safeServiceId(dbPath) based on basename(dbPath). If you need
-   globally unique service ids across directories, consider exporting an alternate
-   id strategy (e.g., hashing dbPath) or exposing an option in exposable().
-*/
