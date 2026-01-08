@@ -1,0 +1,144 @@
+/* bin/web-ui/asset/styles.css */
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+  background: rgba(127, 127, 127, 0.06);
+  backdrop-filter: blur(6px);
+  z-index: 10;
+}
+
+.title {
+  font-size: 16px;
+}
+
+.links a {
+  margin-left: 12px;
+  text-decoration: none;
+}
+
+.container {
+  padding: 16px;
+  padding-top: 64px;   /* header */
+  padding-bottom: 72px; /* footer */
+}
+
+.status {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.controls input {
+  margin-left: 8px;
+  padding: 6px 8px;
+  width: 320px;
+}
+
+.card {
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table thead th {
+  text-align: left;
+  padding: 10px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.table tbody td {
+  padding: 10px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+  vertical-align: top;
+}
+
+.actions {
+  white-space: nowrap;
+  width: 1%;
+}
+
+button {
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.btnlink {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 6px;
+  text-decoration: none;
+  margin-left: 6px;
+}
+
+.hidden {
+  display: none;
+}
+
+.hint {
+  padding: 10px;
+  opacity: 0.8;
+}
+
+.footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  align-items: center;
+
+  padding: 10px 16px;
+  border-top: 1px solid rgba(127, 127, 127, 0.25);
+  background: rgba(127, 127, 127, 0.06);
+  backdrop-filter: blur(6px);
+  z-index: 10;
+}
+
+.footer > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

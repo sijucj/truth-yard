@@ -1,0 +1,88 @@
+<!-- bin/web-ui/asset/index.html -->
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>db-yard web UI</title>
+    <link rel="stylesheet" href="/.db-yard/asset/styles.css" />
+    <link rel="icon" href="/.db-yard/asset/favicon.ico">
+</head>
+
+<body>
+    <header class="topbar">
+        <div class="title">db-yard</div>
+        <div class="links">
+            <a href="/.db-yard/ledger.d/">Browse ledger.d</a>
+            <a href="/.db-yard/api/tagged-processes.json" target="_blank" rel="noreferrer">API</a>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="status">
+            <div class="controls">
+                <label class="mono">
+                    Filter
+                    <input id="filterInput" type="text" placeholder="serviceId, sessionId, pid, upstreamUrl…" />
+                </label>
+                <button id="refreshBtn">Refresh</button>
+            </div>
+        </section>
+
+        <section class="card">
+            <table class="table" id="procTable">
+                <thead>
+                    <tr>
+                        <th>PID</th>
+                        <th>Upstream URL</th>
+                        <th>Proxied URL</th>
+                        <th>DB Yard Service</th>
+                        <th>Ledger Context</th>
+                        <th class="actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="procTbody"></tbody>
+            </table>
+            <div class="hint mono">
+                Proxy behavior: any request whose first URL segment matches a serviceId/sessionId/contextPath prefix
+                will be proxied.
+                Example: /yourServiceId/anything → upstreamUrl/anything
+            </div>
+        </section>
+
+        <section class="status" style="margin-top: 16px;">
+            <div class="controls">
+                <button id="reconcileBtn">Run reconcile</button>
+            </div>
+        </section>
+
+        <section class="card">
+            <table class="table" id="reconcileTable">
+                <thead>
+                    <tr>
+                        <th>kind</th>
+                        <th>pid</th>
+                        <th>serviceId</th>
+                        <th>sessionId</th>
+                        <th>path</th>
+                        <th>cmdline</th>
+                    </tr>
+                </thead>
+                <tbody id="reconcileTbody"></tbody>
+            </table>
+            <div class="hint mono">
+                Reconcile compares tagged processes vs ledger context.json files and reports discrepancies.
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer mono">
+        <div id="procStatusText">Loading…</div>
+        <div id="reconcileStatusText">Reconcile: not run</div>
+    </footer>
+
+    <script src="/.db-yard/asset/app.js"></script>
+</body>
+
+</html>
