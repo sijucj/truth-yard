@@ -6,7 +6,8 @@ import { HelpCommand } from "@cliffy/help";
 import { blue, cyan, dim, green, red, yellow } from "@std/fmt/colors";
 import {
   materialize,
-  materializeWatch,
+  reconcile,
+  type ReconcileItem,
   spawnedLedgerStates,
 } from "../lib/materialize.ts";
 import { generateReverseProxyConfsFromSpawnedStates } from "../lib/reverse-proxy-conf.ts";
@@ -85,7 +86,6 @@ export async function lsProcesses(
 
     const issueStr = issueToString(p.issue);
 
-    // Extended: one essential field per line as "  <key>: <value>"
     console.log(kv("provenance", p.provenance));
     console.log(kv("sessionId", p.sessionId));
     console.log(kv("serviceId", p.serviceId));
@@ -101,6 +101,69 @@ export async function lsProcesses(
     console.log(kv("contextPath", p.contextPath));
     console.log(kv("cmdline", p.cmdline));
     if (issueStr) console.log(kv("issue", issueStr));
+  }
+}
+
+async function printReconcile(
+  spawnStateHomeOrSessionHome: string,
+): Promise<void> {
+  const base = spawnStateHomeOrSessionHome;
+
+  const fmt = (item: ReconcileItem): string => {
+    if (item.kind === "process_without_ledger") {
+      const pid = green(String(item.pid));
+      const sid = cyan(item.serviceId);
+      const sess = dim(item.sessionId);
+      const ctx = blue(item.contextPath);
+      const cmd = item.cmdline ? dim(item.cmdline) : dim("(no cmdline)");
+      return `🟡 ${
+        yellow("process without ledger")
+      } [${pid}] serviceId=${sid} sessionId=${sess}\n  contextPath=${ctx}\n  cmdline=${cmd}`;
+    }
+
+    const pid = red(String(item.pid));
+    const ctx = blue(item.ledgerContextPath);
+    const sid = item.serviceId ? cyan(item.serviceId) : dim("(unknown)");
+    const sess = item.sessionId ? dim(item.sessionId) : dim("(unknown)");
+    return `🟠 ${
+      yellow("ledger without process")
+    } [${pid}] serviceId=${sid} sessionId=${sess}\n  ledgerContextPath=${ctx}`;
+  };
+
+  let any = false;
+
+  const gen = reconcile(base);
+  while (true) {
+    const next = await gen.next();
+    if (next.done) {
+      const s = next.value;
+      const ok = s.processWithoutLedger === 0 && s.ledgerWithoutProcess === 0;
+
+      const headline = ok
+        ? `🟢 ${green("reconcile OK")} (no discrepancies)`
+        : `🔶 ${yellow("reconcile found discrepancies")}`;
+
+      console.log(headline);
+      console.log(
+        `  ${dim("processWithoutLedger")}: ${
+          blue(String(s.processWithoutLedger))
+        }`,
+      );
+      console.log(
+        `  ${dim("ledgerWithoutProcess")}: ${
+          blue(String(s.ledgerWithoutProcess))
+        }`,
+      );
+
+      if (!any && !ok) {
+        // should not happen, but keep output consistent
+        console.log(dim("  (no items emitted)"));
+      }
+      return;
+    }
+
+    any = true;
+    console.log(fmt(next.value));
   }
 }
 
@@ -121,11 +184,6 @@ await new Command()
     `Start with essential verbosity`,
     "yard.ts start --verbose essential",
   )
-  .example(`Start and keep running in watch mode`, "yard.ts start --watch")
-  .example(
-    `Watch with strict kill scoping (only kill processes started in this watch session)`,
-    "yard.ts start --watch --strict-kills-only",
-  )
   .example(`List Linux processes started by yard.ts`, "yard.ts ps -e")
   .example(
     `List all managed processes in ${defaultSpawnStateHome}`,
@@ -135,10 +193,14 @@ await new Command()
     `Stop (kill) all managed processes in ${defaultSpawnStateHome}`,
     "yard.ts kill",
   )
+  .example(
+    `Continuously watch ${defaultCargoHome} and keep services in sync`,
+    "yard.ts watch",
+  )
   .example(`Start web UI + watcher`, "yard.ts web-ui --watch")
   .command(
     "start",
-    `Start exposable databases (default root ${defaultCargoHome}) and exit (or --watch to keep in sync)`,
+    `Start exposable databases (default root ${defaultCargoHome}) and exit`,
   )
   .type("verbose", verboseType)
   .option(
@@ -152,89 +214,23 @@ await new Command()
     { default: defaultSpawnStateHome },
   )
   .option("--verbose <level:verbose>", "Spawn/materialize verbosity")
-  .option(
-    "--summarize",
-    "Summarize after spawning (and after each watch cycle)",
-  )
+  .option("--summarize", "Summarize after spawning")
   .option("--no-ls", "Don't list after spawning")
-  // ---- new: watch + useful knobs ----
-  .option(
-    "--watch",
-    `Continuously watch cargo and keep services in sync (spawns new, kills removed)`,
-  )
-  .option(
-    "--watch-debounce-ms <ms:number>",
-    "Watch debounce window (default 750ms)",
-    { default: 750 },
-  )
-  .option(
-    "--strict-kills-only",
-    "Watch: only kill processes whose provenance AND sessionId match this watch session (default off)",
-  )
-  .option(
-    "--no-smart-spawn",
-    "Disable smartSpawn (default on). When on, avoids spawning a DB if already running (Linux taggedProcesses).",
-  )
-  .action(
-    async (
-      {
-        summarize,
-        verbose,
-        ls,
-        cargoHome,
-        spawnStateHome,
-        watch,
-        watchDebounceMs,
-        strictKillsOnly,
-        smartSpawn,
-      },
-    ) => {
-      const v = verbose ? verbose : false;
+  .action(async ({ summarize, verbose, ls, cargoHome, spawnStateHome }) => {
+    const result = await materialize([{ path: cargoHome }], {
+      verbose: verbose ? verbose : false,
+      spawnedLedgerHome: spawnStateHome,
+    });
 
-      if (watch) {
-        for await (
-          const result of materializeWatch([{ path: cargoHome }], {
-            verbose: v,
-            spawnedLedgerHome: spawnStateHome,
-            smartSpawn: smartSpawn !== false, // default true; --no-smart-spawn flips it to false
-            watch: {
-              enabled: true,
-              debounceMs: watchDebounceMs,
-              strictKillsOnly: strictKillsOnly ? true : false,
-            },
-          })
-        ) {
-          if (summarize) {
-            console.log(`sessionHome: ${result.sessionHome}`);
-            if (result.sessionId) console.log(`sessionId: ${result.sessionId}`);
-            console.log("summary:", result.summary);
-          }
+    if (summarize) {
+      console.log(`sessionHome: ${result.sessionHome}`);
+      console.log("summary:", result.summary);
+    }
 
-          if (ls) {
-            await lsProcesses();
-          }
-        }
-
-        return;
-      }
-
-      const result = await materialize([{ path: cargoHome }], {
-        verbose: v,
-        spawnedLedgerHome: spawnStateHome,
-        smartSpawn: smartSpawn !== false, // default true
-      });
-
-      if (summarize) {
-        console.log(`sessionHome: ${result.sessionHome}`);
-        if (result.sessionId) console.log(`sessionId: ${result.sessionId}`);
-        console.log("summary:", result.summary);
-      }
-
-      if (ls) {
-        await lsProcesses();
-      }
-    },
-  )
+    if (ls) {
+      await lsProcesses();
+    }
+  })
   .command(
     "ls",
     `List upstream URLs and PIDs from spawned states (default ${defaultSpawnStateHome})`,
@@ -249,8 +245,21 @@ await new Command()
   })
   .command("ps", `List Linux tagged processes`)
   .option("-e, --extended", `Show provenance details`)
+  .option(
+    "--reconcile",
+    `Also reconcile tagged processes vs spawned ledger (context.json files)`,
+  )
+  .option(
+    "--spawn-state-home <dir:string>",
+    `Spawn state home OR a specific sessionHome (default ${defaultSpawnStateHome})`,
+    { default: defaultSpawnStateHome },
+  )
   .action(async (options) => {
     await lsProcesses(options);
+    if (options.reconcile) {
+      console.log("");
+      await printReconcile(options.spawnStateHome);
+    }
   })
   .command(
     "proxy-conf",
