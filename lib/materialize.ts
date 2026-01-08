@@ -1,4 +1,4 @@
-// lib/yard.ts
+// lib/materialize.ts
 import { ensureDir } from "@std/fs";
 import { basename, dirname, extname, join, relative, resolve } from "@std/path";
 import type { Path } from "./discover.ts";
