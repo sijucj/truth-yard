@@ -1,4 +1,3 @@
-```dockerfile
 # syntax=docker/dockerfile:1
 #
 # db-yard container (Debian “mini” base)
@@ -56,4 +55,3 @@ EOF
  && chmod +x /usr/local/bin/db-yard-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/db-yard-entrypoint.sh"]
-```
