@@ -240,6 +240,8 @@ flags.
 
 ## Web UI
 
+![db-yard Web UI Screenshot](project-screen.webp)
+
 You can start a web-based administration server using:
 
 ```bash
