@@ -182,7 +182,7 @@ async function main() {
   const assetsDir = cmd.options.assetsDir;
   const proxyEnabled = !cmd.options.proxy;
 
-  for (const deps of [ledgerDir, assetsDir]) {
+  for (const deps of [assetsDir]) {
     try {
       const st = await Deno.stat(deps);
       if (!st.isDirectory) {
