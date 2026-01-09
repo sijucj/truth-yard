@@ -238,24 +238,102 @@ bin/yard.ts proxy-conf --type both
 Supported options include prefix overrides, strip-prefix, and engine-specific
 flags.
 
-## Operational philosophy
+## Web UI
 
-- Files, not APIs
-- Deterministic behavior
-- Zero hidden state
-- Easy inspection and auditing
-- Killable, restartable processes
+You can start a web-based administration server using:
 
-If something goes wrong, you should be able to open a JSON file, read a log,
-kill a PID, and rerun a command.
+```bash
+./bin/web-ui/serve.ts
+```
 
-## Who this is for
+By default it starts on:
 
-db-yard is ideal for engineers who prefer local-first workflows, tooling authors
-who want inspectable state, SQLPage and surveilr users, CI systems, and reverse
-proxy pipelines.
+```
+http://127.0.0.1:8787/
+```
 
-## Summary
+The root URL redirects automatically to:
 
-db-yard is intentionally boring in the best way possible. If you understand
-files, processes, ports, and logs, you already understand db-yard.
+```
+/.db-yard/ui/
+```
+
+### Running Services
+
+This shows all currently tagged processes managed by db-yard.
+
+For each service you can see:
+
+- PID of the running process
+- Upstream URL (where the service actually listens)
+- Proxied URL (the local path exposed by db-yard)
+- DB Yard Service (serviceId, with sessionId available via tooltip)
+- Ledger Context (link to the exact `*.context.json` file in `ledger.d`)
+- Actions to view STDOUT and STDERR logs
+
+Everything shown here maps directly to files in `ledger.d` or to an active
+process.
+
+### Reconcile table
+
+This compares live tagged processes against ledger context files.
+
+It highlights:
+
+- ledger entries without a running process (likely crashed or stopped)
+- processes without a corresponding ledger entry (unexpected or orphaned)
+
+This is useful for quickly spotting inconsistencies between “what should be
+running” and “what actually is”.
+
+### Ledger browser
+
+The “Browse ledger.d” link lets you navigate the ledger directory directly in
+the browser, including context files and logs.
+
+### Proxy debugging and tracing
+
+The UI and API expose explicit debug endpoints to understand proxy behavior:
+
+- `/.db-yard/api/proxy-debug.json?path=/some/path` Shows which proxy rule
+  matched, how the upstream URL is constructed, and which headers are forwarded
+  (with secrets redacted).
+
+- `/.db-yard/api/proxy-roundtrip.json?path=/some/path` Performs a real upstream
+  request and reports status, headers, latency, and a small response preview.
+
+You can also trace any proxied request end-to-end by adding:
+
+```env
+?__db_yard_trace=1
+```
+
+or sending the header:
+
+```yaml
+x-db-yard-trace: 1
+```
+
+The response will include trace headers showing the matched base path and
+upstream, and the server logs a single structured trace line for correlation.
+
+### About the built-in proxy
+
+The db-yard proxy is intentionally simple and transparent.
+
+It’s ideal for:
+
+- local development
+- testing routing behavior
+- validating upstream services
+- lightweight, low-traffic use
+- debugging headers and path rewriting
+
+For anything beyond that (higher traffic, TLS termination, auth, rate limiting,
+resilience, observability), you should point industrial-grade proxy servers such
+as NGINX, Traefik, Envoy, or cloud load balancers directly at the upstream URLs.
+db-yard can already generate proxy configuration inputs from ledger state to
+support that workflow.
+
+The design intent is clarity and debuggability first, not to replace production
+proxy infrastructure.

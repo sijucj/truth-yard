@@ -7,7 +7,13 @@ import { Hono } from "jsr:@hono/hono@4.11.3";
 import { serveStatic } from "jsr:@hono/hono@4.11.3/deno";
 import { proxy } from "jsr:@hono/hono@4.11.3/proxy";
 import { reconcile, type ReconcileItem } from "../../lib/materialize.ts";
-import { TaggedProcess, taggedProcesses } from "../../lib/spawn.ts";
+import { taggedProcesses } from "../../lib/spawn.ts";
+import {
+  applyTraceHeaders,
+  buildProxyTableWithConflicts,
+  registerDebugRoutes,
+  resolveProxyPath,
+} from "./debug.ts";
 
 /* ---------------- utilities ---------------- */
 
@@ -81,79 +87,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       )
     ),
   ]).finally(() => clearTimeout(t));
-}
-
-/* ---------------- proxy table + resolution ---------------- */
-
-type ProxyRoute = { basePath: string; upstreamUrl: string };
-type ProxyConflict = { basePath: string; upstreamUrls: string[] };
-
-function normalizeBasePath(p: string) {
-  const s = p.trim();
-  if (!s) return "";
-  const withSlash = s.startsWith("/") ? s : `/${s}`;
-  return withSlash.length > 1 ? withSlash.replace(/\/+$/, "") : withSlash;
-}
-
-function buildProxyTableWithConflicts(processes: TaggedProcess[]) {
-  const raw: ProxyRoute[] = [];
-  const byBase = new Map<string, Set<string>>();
-
-  for (const p of processes) {
-    const upstreamUrl = typeof p.upstreamUrl === "string" ? p.upstreamUrl : "";
-    if (!upstreamUrl) continue;
-
-    const pep = typeof p.proxyEndpointPrefix === "string"
-      ? String(p.proxyEndpointPrefix)
-      : "";
-    const basePath = normalizeBasePath(pep);
-    if (basePath) raw.push({ basePath, upstreamUrl });
-
-    const sid = typeof p.serviceId === "string" ? p.serviceId.trim() : "";
-    if (sid && !sid.includes("/")) {
-      raw.push({ basePath: `/${sid}`, upstreamUrl });
-    }
-
-    // NOTE: do NOT add sessionId fallback mapping (usually UUID/noisy)
-  }
-
-  // keep first mapping, but record conflicts
-  const seen = new Set<string>();
-  const table = raw
-    .map((r) => ({ ...r, basePath: r.basePath.replace(/\/+$/, "") || "/" }))
-    .filter((r) => {
-      if (!byBase.has(r.basePath)) byBase.set(r.basePath, new Set());
-      byBase.get(r.basePath)!.add(r.upstreamUrl);
-      if (seen.has(r.basePath)) return false;
-      seen.add(r.basePath);
-      return true;
-    });
-
-  const conflicts: ProxyConflict[] = [];
-  for (const [basePath, urls] of byBase.entries()) {
-    if (urls.size > 1) {
-      conflicts.push({ basePath, upstreamUrls: [...urls].sort() });
-    }
-  }
-  conflicts.sort((a, b) => b.basePath.length - a.basePath.length);
-
-  // prefer longest match when resolving
-  const sortedByLen = [...table].sort((a, b) =>
-    b.basePath.length - a.basePath.length
-  );
-
-  return { table: sortedByLen, conflicts };
-}
-
-function resolveProxyPath(pathname: string, routes: ProxyRoute[]) {
-  const path = pathname.startsWith("/") ? pathname : `/${pathname}`;
-  const route = routes.find((r) =>
-    path === r.basePath || path.startsWith(r.basePath + "/")
-  );
-  if (!route) return null;
-
-  const rest = path.slice(route.basePath.length) || "/";
-  return { route, rest };
 }
 
 /* ---------------- ledger HTML ---------------- */
@@ -310,6 +243,15 @@ async function main() {
       count: processes.length,
       taggedProcesses: processes,
     });
+  });
+
+  // Debug endpoints (proxy-debug, proxy-roundtrip, trace-help)
+  const dbg = registerDebugRoutes({
+    app,
+    apiMount,
+    uiMount,
+    ledgerDir,
+    getProcesses: () => Array.fromAsync(taggedProcesses()),
   });
 
   /* ---- API: reconcile + proxy conflict report ---- */
@@ -517,11 +459,41 @@ async function main() {
       const proxiedUrl = new URL(rest, target);
       proxiedUrl.search = new URL(c.req.url).search;
 
-      return proxy(proxiedUrl.toString(), {
+      const traceOn = dbg.traceRequested(c);
+      const traceId = traceOn ? dbg.getOrMakeTraceId(c) : "";
+      const started = Date.now();
+
+      const resp = await proxy(proxiedUrl.toString(), {
         method: c.req.method,
         headers: c.req.raw.headers,
         body: c.req.raw.body,
       });
+
+      if (!traceOn) return resp;
+
+      const traced = applyTraceHeaders(resp, {
+        traceId,
+        matchedBasePath: resolved.route.basePath,
+        upstreamUrl: resolved.route.upstreamUrl,
+        rest: resolved.rest,
+      });
+
+      // One structured log line per traced request
+      const ms = Date.now() - started;
+      // import logTraceLine if you want; keeping this inline avoids extra imports
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        traceId,
+        method: c.req.method,
+        path: c.req.path,
+        matchedBasePath: resolved.route.basePath,
+        upstreamUrl: resolved.route.upstreamUrl,
+        rest: resolved.rest,
+        status: traced.status,
+        ms,
+      }));
+
+      return traced;
     });
   }
 
