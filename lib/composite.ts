@@ -1,0 +1,439 @@
+/**
+ * @module lib/composite
+ *
+ * Deterministic composite.sql generator for db-yard embedded SQLite “composite connections”.
+ *
+ * This module discovers SQLite database files using globs and generates a deterministic
+ * `composite.sql` file containing:
+ * - `ATTACH DATABASE ... AS <alias>;` statements for each discovered DB
+ * - optional PRAGMAs (e.g., WAL mode) emitted in a deterministic order
+ * - optional extra SQL (typically views) emitted in a deterministic order
+ *
+ * Determinism contract (core invariants)
+ * 1) Discovery order must never influence aliasing or ATTACH output.
+ *    - All discovered inputs are normalized, deduped, and canonically sorted BEFORE alias assignment.
+ *    - Alias generation MUST be a pure function of a stable identifier (default: relative path from baseDir).
+ * 2) Optional PRAGMAs / extra SQL are emitted in a fixed, documented order.
+ *    - Pragmas are normalized, deduped, and sorted lexicographically by default.
+ *    - Extra SQL is normalized and (optionally) sorted by default to avoid nondeterminism.
+ * 3) Default SQL header is deterministic (no timestamps).
+ *
+ * If you need the clearest “what should the output look like?” reference,
+ * see the golden-string tests in `compose_test.ts`, which encode the expected SQL exactly.
+ *
+ * Basic example
+ * ```ts
+ * import { compose } from "./lib/composite.ts";
+ *
+ * const result = await compose({
+ *   layout: { volumeRoot: "/var/db-yard" },
+ *   scope: "tenant",
+ *   tenantId: "tenant-123",
+ *   configure: (ctx) => ({
+ *     globs: ["db*.sqlite.db", "db*.db"],
+ *     // Alias is derived from stableKey (relative path) by default.
+ *     pragmas: () => [
+ *       // Enable only if this composite will be used for read/write workflows.
+ *       // "PRAGMA journal_mode = WAL;",
+ *       // "PRAGMA synchronous = NORMAL;",
+ *     ],
+ *     extraSql: (dbs) => {
+ *       // Optionally create a view across attached DBs (deterministically).
+ *       const unions = dbs.map((d) => `SELECT '${d.alias}' AS source_db, * FROM ${d.alias}.evidence`);
+ *       return unions.length
+ *         ? [`CREATE VIEW IF NOT EXISTS all_evidence AS\n${unions.join("\nUNION ALL\n")};`]
+ *         : [];
+ *     },
+ *   }),
+ * });
+ *
+ * // Write result.sql to <baseDir>/composite.sql; a separate step can execute it
+ * // to build composite.sqlite.auto.db.
+ * console.log(result.sql);
+ * ```
+ */
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
+
+import { expandGlob } from "jsr:@std/fs@^1.0.0/expand-glob";
+import { basename, join, normalize, relative } from "jsr:@std/path@^1.0.0";
+
+export type CompositeScope = "admin" | "cross-tenant" | "tenant";
+
+export interface CompositeLayout {
+  readonly volumeRoot: string;
+  readonly embeddedDir?: string;
+  readonly adminDir?: string;
+  readonly crossTenantDir?: string;
+  readonly tenantDir?: string;
+  readonly compositeSqlName?: string;
+  readonly compositeDbAutoName?: string;
+}
+
+/**
+ * A discovered DB file that will be ATTACHed.
+ */
+export interface DiscoveredDb<TMeta = unknown> {
+  readonly path: string; // absolute path on disk
+  readonly relKey: string; // stable identifier: canonical relative path from baseDir (or fallback)
+  readonly alias: string; // schema name used in ATTACH
+  readonly readOnly?: boolean;
+  readonly meta?: TMeta;
+}
+
+/**
+ * You can swap this out if you want Node (fast-glob, globby, etc.).
+ */
+export interface GlobWalker {
+  walk(
+    globs: readonly string[],
+    opts?: { readonly cwd?: string; readonly ignore?: readonly string[] },
+  ): AsyncIterable<string>;
+}
+
+/**
+ * Default Deno glob walker (std/fs expandGlob).
+ */
+export const denoGlobWalker: GlobWalker = {
+  async *walk(globs, opts) {
+    const cwd = opts?.cwd ?? Deno.cwd();
+    const ignore = new Set(opts?.ignore ?? []);
+    for (const pattern of globs) {
+      for await (
+        const entry of expandGlob(pattern, { root: cwd, globstar: true })
+      ) {
+        if (!entry.isFile) continue;
+        const p = normalize(entry.path);
+        if (ignore.has(p)) continue;
+        yield p;
+      }
+    }
+  },
+};
+
+/**
+ * Stable alias from a stable key (default is relKey).
+ * You can override via config.aliasForKey.
+ */
+export function defaultAliasForKey(stableKey: string): string {
+  // stableKey might be "db3.sqlite.db" or "qualityfolio/db.sqlite.db"
+  const file = basename(stableKey);
+  const withoutExt = file
+    .replace(/\.sqlite(\.db)?$/i, "")
+    .replace(/\.db$/i, "");
+  return withoutExt.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/**
+ * Emits ATTACH statements that SQLite can run.
+ */
+export interface SqlEmitter {
+  header?(ctx: ComposeContext<Any>): string | string[];
+  attach?(db: DiscoveredDb<Any>, ctx: ComposeContext<Any>): string | string[];
+  footer?(ctx: ComposeContext<Any>): string | string[];
+}
+
+/**
+ * Default deterministic SQLite emitter (no timestamps).
+ */
+export const defaultSqliteEmitter: SqlEmitter = {
+  header(ctx) {
+    const lines: string[] = [];
+    lines.push(
+      "-- Auto-generated by compose(); DO NOT EDIT composite.sqlite.auto.db directly",
+    );
+    lines.push(
+      `-- scope: ${ctx.scope}${
+        ctx.tenantId ? ` tenantId=${ctx.tenantId}` : ""
+      }`,
+    );
+    lines.push("");
+
+    for (const pragma of ctx.pragmas) lines.push(pragma);
+    if (ctx.pragmas.length) lines.push("");
+
+    return lines;
+  },
+  attach(db, ctx) {
+    const attachPath = ctx.makeAttachPath(db.path);
+    return `ATTACH DATABASE '${sqlQuoteSingle(attachPath)}' AS ${db.alias};`;
+  },
+  footer(ctx) {
+    const lines: string[] = [];
+    if (ctx.extraSql.length) {
+      lines.push("");
+      lines.push("-- extra SQL (views, etc.)");
+      lines.push(...ctx.extraSql);
+    }
+    lines.push("");
+    return lines;
+  },
+};
+
+function sqlQuoteSingle(s: string): string {
+  return s.replaceAll("'", "''");
+}
+
+export type DeterministicOrder = "sorted" | "asProvided";
+
+export interface ComposeContext<TMeta = unknown> {
+  layout: Required<CompositeLayout>;
+  scope: CompositeScope;
+  tenantId?: string;
+
+  baseDir: string;
+
+  // Emitted in deterministic order per config
+  pragmas: string[];
+  extraSql: string[];
+
+  // Turn an absolute db file path into the path to put in ATTACH.
+  makeAttachPath: (absDbPath: string) => string;
+
+  // Stable identifier for aliasing and sorting (default: relative-to-baseDir)
+  stableKeyForPath: (absDbPath: string) => string;
+
+  pathInScope: (...parts: string[]) => string;
+  defaultIgnores: readonly string[];
+}
+
+export interface ComposeConfig<TMeta = unknown> {
+  globs: readonly string[];
+  ignore?: readonly string[];
+
+  // Determinism controls
+  pragmaOrder?: DeterministicOrder; // default: "sorted"
+  extraSqlOrder?: DeterministicOrder; // default: "sorted"
+
+  // Alias MUST be derived from stable identifiers, not iteration order.
+  aliasForKey?: (stableKey: string, ctx: ComposeContext<TMeta>) => string;
+
+  include?: (
+    absDbPath: string,
+    ctx: ComposeContext<TMeta>,
+  ) => boolean | Promise<boolean>;
+  metaForPath?: (
+    absDbPath: string,
+    ctx: ComposeContext<TMeta>,
+  ) => TMeta | Promise<TMeta>;
+
+  pragmas?: (ctx: ComposeContext<TMeta>) => string[] | Promise<string[]>;
+  extraSql?: (
+    dbs: readonly DiscoveredDb<TMeta>[],
+    ctx: ComposeContext<TMeta>,
+  ) => string[] | Promise<string[]>;
+
+  emitter?: SqlEmitter;
+}
+
+export interface ComposeResult<TMeta = unknown> {
+  ctx: ComposeContext<TMeta>;
+  dbs: DiscoveredDb<TMeta>[];
+  sql: string;
+}
+
+export async function compose<TMeta = unknown>(args: {
+  layout: CompositeLayout;
+  scope: CompositeScope;
+  tenantId?: string;
+  configure: (
+    ctx: ComposeContext<TMeta>,
+  ) => ComposeConfig<TMeta> | Promise<ComposeConfig<TMeta>>;
+  walker?: GlobWalker;
+}): Promise<ComposeResult<TMeta>> {
+  const layout = withDefaults(args.layout);
+  const scope = args.scope;
+  const tenantId = args.tenantId;
+
+  const baseDir = scopeBaseDir(layout, scope, tenantId);
+
+  const ctx: ComposeContext<TMeta> = {
+    layout,
+    scope,
+    tenantId,
+    baseDir,
+    pragmas: [],
+    extraSql: [],
+    makeAttachPath: (absDbPath: string) => {
+      const absBase = normalize(baseDir);
+      const absDb = normalize(absDbPath);
+      if (absDb.startsWith(absBase + "/") || absDb === absBase) {
+        return relative(absBase, absDb);
+      }
+      return absDbPath;
+    },
+    stableKeyForPath: (absDbPath: string) => {
+      // Canonical stable key used for sorting + aliasing.
+      // Prefer a normalized relative path within scope. Else fall back to normalized absolute path.
+      const absBase = normalize(baseDir);
+      const absDb = normalize(absDbPath);
+      if (absDb.startsWith(absBase + "/") || absDb === absBase) {
+        return normalize(relative(absBase, absDb));
+      }
+      return absDb;
+    },
+    pathInScope: (...parts) => join(baseDir, ...parts),
+    defaultIgnores: [
+      normalize(join(baseDir, layout.compositeDbAutoName)),
+      normalize(join(baseDir, layout.compositeSqlName)),
+    ],
+  };
+
+  const config = await args.configure(ctx);
+  const walker = args.walker ?? denoGlobWalker;
+  const emitter = config.emitter ?? defaultSqliteEmitter;
+
+  const pragmaOrder: DeterministicOrder = config.pragmaOrder ?? "sorted";
+  const extraSqlOrder: DeterministicOrder = config.extraSqlOrder ?? "sorted";
+
+  // Pragmas (deterministic)
+  const pragmasRaw = (await config.pragmas?.(ctx)) ?? [];
+  ctx.pragmas = canonicalizeLines(pragmasRaw, pragmaOrder);
+
+  // Walk and collect candidates (do not alias yet)
+  const ignore = new Set<string>(
+    [
+      ...ctx.defaultIgnores,
+      ...(config.ignore ?? []),
+    ].map(normalize),
+  );
+
+  const candidatesAbs: string[] = [];
+  for await (const p of walker.walk(config.globs, { cwd: baseDir })) {
+    const abs = normalize(isProbablyAbsolute(p) ? p : join(baseDir, p));
+    if (ignore.has(abs)) continue;
+    candidatesAbs.push(abs);
+  }
+
+  // Canonicalize candidates:
+  // 1) normalize
+  // 2) dedupe
+  // 3) filter by include + looksLikeSqliteDb
+  // 4) compute stableKey
+  // 5) sort by stableKey
+  const seen = new Set<string>();
+  const filtered: { absPath: string; stableKey: string }[] = [];
+
+  for (const absPath of candidatesAbs) {
+    const abs = normalize(absPath);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+
+    if (ignore.has(abs)) continue;
+    if (!looksLikeSqliteDb(abs)) continue;
+    if (config.include && !(await config.include(abs, ctx))) continue;
+
+    const stableKey = ctx.stableKeyForPath(abs);
+    filtered.push({ absPath: abs, stableKey });
+  }
+
+  filtered.sort((a, b) => a.stableKey.localeCompare(b.stableKey));
+
+  // Alias assignment (pure function of stableKey)
+  const aliasForKey = config.aliasForKey ??
+    ((k, _ctx) => defaultAliasForKey(k));
+
+  const dbs: DiscoveredDb<TMeta>[] = [];
+  for (const item of filtered) {
+    const alias = aliasForKey(item.stableKey, ctx);
+    const meta = config.metaForPath
+      ? await config.metaForPath(item.absPath, ctx)
+      : undefined;
+    dbs.push({ path: item.absPath, relKey: item.stableKey, alias, meta });
+  }
+
+  // Extra SQL (deterministic)
+  const extraSqlRaw = (await config.extraSql?.(dbs, ctx)) ?? [];
+  ctx.extraSql = canonicalizeLines(extraSqlRaw, extraSqlOrder);
+
+  // Emit SQL (deterministic: order is dbs in stableKey sort order)
+  const lines: string[] = [];
+  const push = (s: string | string[]) =>
+    Array.isArray(s) ? lines.push(...s) : lines.push(s);
+
+  if (emitter.header) push(emitter.header(ctx));
+  for (const db of dbs) {
+    const stmt = emitter.attach
+      ? emitter.attach(db, ctx)
+      : defaultSqliteEmitter.attach!(db, ctx);
+    push(stmt);
+  }
+  if (emitter.footer) push(emitter.footer(ctx));
+
+  const sql = lines
+    .flatMap((l) => l.split("\n"))
+    .map((l) => l.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd() + "\n";
+
+  return { ctx, dbs, sql };
+}
+
+function canonicalizeLines(
+  input: string[],
+  order: DeterministicOrder,
+): string[] {
+  // Normalize line endings and trim trailing whitespace for deterministic comparisons.
+  // Dedup while preserving determinism. For "sorted" we dedup by Set then sort.
+  const normalized = input
+    .flatMap((s) => s.split("\n"))
+    .map((s) => s.trimEnd())
+    .filter((s) => s.length > 0);
+
+  if (order === "asProvided") {
+    // Dedup in first-seen order
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const s of normalized) {
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  }
+
+  // sorted
+  return [...new Set(normalized)].sort((a, b) => a.localeCompare(b));
+}
+
+function withDefaults(layout: CompositeLayout): Required<CompositeLayout> {
+  return {
+    volumeRoot: layout.volumeRoot,
+    embeddedDir: layout.embeddedDir ?? "embedded",
+    adminDir: layout.adminDir ?? "admin",
+    crossTenantDir: layout.crossTenantDir ?? "cross-tenant",
+    tenantDir: layout.tenantDir ?? "tenant",
+    compositeSqlName: layout.compositeSqlName ?? "composite.sql",
+    compositeDbAutoName: layout.compositeDbAutoName ??
+      "composite.sqlite.auto.db",
+  };
+}
+
+function scopeBaseDir(
+  layout: Required<CompositeLayout>,
+  scope: CompositeScope,
+  tenantId?: string,
+): string {
+  const root = join(layout.volumeRoot, layout.embeddedDir);
+  if (scope === "admin") return join(root, layout.adminDir);
+  if (scope === "cross-tenant") return join(root, layout.crossTenantDir);
+  if (scope === "tenant") {
+    if (!tenantId) throw new Error("tenantId is required when scope='tenant'");
+    return join(root, layout.tenantDir, tenantId);
+  }
+  throw new Error(`Unsupported scope: ${scope}`);
+}
+
+function isProbablyAbsolute(p: string): boolean {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
+}
+
+function looksLikeSqliteDb(p: string): boolean {
+  const b = basename(p).toLowerCase();
+  if (b.endsWith(".sqlite")) return true;
+  if (b.endsWith(".sqlite.db")) return true;
+  if (b.endsWith(".db")) return true;
+  return false;
+}
