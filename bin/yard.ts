@@ -7,6 +7,7 @@ import { blue, cyan, dim, green, red, yellow } from "@std/fmt/colors";
 import { compose } from "../lib/composite.ts";
 import {
   materialize,
+  materializeWatch,
   reconcile,
   type ReconcileItem,
   spawnedLedgerStates,
@@ -197,7 +198,7 @@ await new Command()
   )
   .example(
     `Continuously watch ${defaultCargoHome} and keep services in sync`,
-    "yard.ts watch",
+    "yard.ts start --watch",
   )
   .example(`Start web UI + watcher`, "yard.ts web-ui --watch")
   .command(
@@ -218,21 +219,108 @@ await new Command()
   .option("--verbose <level:verbose>", "Spawn/materialize verbosity")
   .option("--summarize", "Summarize after spawning")
   .option("--no-ls", "Don't list after spawning")
-  .action(async ({ summarize, verbose, ls, cargoHome, ledgerHome }) => {
-    const result = await materialize([{ path: cargoHome }], {
-      verbose: verbose ? verbose : false,
-      spawnedLedgerHome: ledgerHome,
-    });
+  .option(
+    "--watch",
+    "Watch cargo-home and keep services in sync (remove => kill, change => reconcile spawn)",
+  )
+  .option(
+    "--watch-debounce-ms <ms:number>",
+    "Watch mode: debounce window in ms (default 750)",
+  )
+  .option(
+    "--watch-strict-kills-only",
+    "Watch mode: only kill processes from THIS watch loop session (Linux only)",
+  )
+  .action(
+    async (
+      {
+        summarize,
+        verbose,
+        ls,
+        cargoHome,
+        ledgerHome,
+        watch,
+        watchDebounceMs,
+        watchStrictKillsOnly,
+      },
+    ) => {
+      const optsBase = {
+        verbose: verbose ? verbose : false,
+        spawnedLedgerHome: ledgerHome,
+      } as const;
 
-    if (summarize) {
-      console.log(`sessionHome: ${result.sessionHome}`);
-      console.log("summary:", result.summary);
-    }
+      if (watch) {
+        console.log(
+          `👀 ${green("Watch mode enabled")} — monitoring ${yellow(cargoHome)}`,
+        );
+        console.log(
+          `⏱️  debounce=${
+            blue(
+              String(watchDebounceMs ?? 750),
+            )
+          }ms  strictKillsOnly=${
+            blue(
+              String(!!watchStrictKillsOnly),
+            )
+          }`,
+        );
+        console.log(dim("Press Ctrl+C to stop watching.\n"));
 
-    if (ls) {
-      await lsProcesses();
-    }
-  })
+        const gen = materializeWatch([{ path: cargoHome }], {
+          ...optsBase,
+          watch: {
+            enabled: true,
+            debounceMs: typeof watchDebounceMs === "number"
+              ? watchDebounceMs
+              : undefined,
+            strictKillsOnly: watchStrictKillsOnly ? true : undefined,
+          },
+        });
+
+        let first = true;
+
+        for await (const result of gen) {
+          if (first) {
+            console.log(`🚀 ${green("Initial materialization complete")}`);
+            first = false;
+          } else {
+            console.log(
+              `🔁 ${cyan("Change detected")} — reconciling services…`,
+            );
+          }
+
+          console.log(
+            `📦 sessionHome: ${yellow(result.sessionHome)}`,
+          );
+          console.log(
+            `📊 summary: ${blue(JSON.stringify(result.summary))}`,
+          );
+
+          if (ls) {
+            console.log(dim("\n🔍 Listing active services:"));
+            await lsProcesses();
+          }
+
+          console.log(dim("\n⏳ Waiting for next change…\n"));
+        }
+
+        return;
+      }
+
+      const result = await materialize([{ path: cargoHome }], {
+        ...optsBase,
+      });
+
+      if (summarize) {
+        console.log(`sessionHome: ${result.sessionHome}`);
+        console.log("summary:", result.summary);
+      }
+
+      if (ls) {
+        await lsProcesses();
+      }
+    },
+  )
   .command(
     "cc",
     "Generate SQL DDL for Composite Connections (CC) and emit to STDOUT",
@@ -287,12 +375,7 @@ await new Command()
 
     const globs = parseCsv(o.globs);
 
-    const ignore = o.ignore
-      ? parseCsv(o.ignore).map((p) =>
-        // allow relative ignores; resolve them later under baseDir
-        p
-      )
-      : undefined;
+    const ignore = o.ignore ? parseCsv(o.ignore).map((p) => p) : undefined;
 
     if (o.scope === "tenant" && !o.tenantId) {
       console.error(red("cc: --tenant-id is required when --scope tenant"));
@@ -329,7 +412,6 @@ await new Command()
       }),
     });
 
-    // Emit to STDOUT
     console.log(result.sql);
   })
   .command(

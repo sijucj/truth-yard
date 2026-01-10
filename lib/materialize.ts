@@ -314,56 +314,119 @@ export async function* materializeWatch(
   });
 
   // Watch all roots (best effort). If a srcPath is a file, watchFs will still work.
+  // Watch all roots (best effort). If a srcPath is a file, watchFs will still work.
   const rootsToWatch = src.map((p) => p.path);
-
   const watcher = Deno.watchFs(rootsToWatch, { recursive: true });
+  const it = watcher[Symbol.asyncIterator]();
 
-  let timer: number | undefined;
-  let pending = false;
-
-  const touched = new Set<string>();
-  const removed = new Set<string>();
-
-  const waitForDebounce = async () => {
-    if (!pending) return;
-    await new Promise<void>((resolvePromise) => {
-      const check = () => {
-        if (timer === undefined) resolvePromise();
-        else setTimeout(check, 10);
-      };
-      check();
-    });
+  const isDbCandidate = (p: string): boolean => {
+    const s = resolve(p);
+    if (/-wal$/i.test(s) || /-shm$/i.test(s) || /-journal$/i.test(s)) {
+      return false;
+    }
+    return /\.(sqlite(\.db)?|db)$/i.test(s);
   };
 
-  const schedule = () => {
-    pending = true;
-    if (timer !== undefined) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = undefined;
-    }, debounceMs) as unknown as number;
-  };
+  const listDbCandidates = async (
+    roots: readonly string[],
+  ): Promise<Set<string>> => {
+    const out = new Set<string>();
 
-  for await (const ev of watcher) {
-    // Collect paths
-    for (const p of ev.paths ?? []) {
-      touched.add(resolve(p));
-      if (ev.kind === "remove") removed.add(resolve(p));
+    const walk = async (dir: string) => {
+      let entries: Deno.DirEntry[];
+      try {
+        entries = [];
+        for await (const e of Deno.readDir(dir)) entries.push(e);
+      } catch {
+        return; // permissions, missing dir, etc. => treat as empty
+      }
+
+      for (const e of entries) {
+        const full = resolve(dir, e.name);
+        if (e.isDirectory) {
+          await walk(full);
+          continue;
+        }
+        if (!e.isFile) continue;
+        if (isDbCandidate(full)) out.add(full);
+      }
+    };
+
+    for (const r of roots) {
+      const rp = resolve(r);
+      try {
+        const st = await Deno.lstat(rp);
+        if (st.isDirectory) {
+          await walk(rp);
+        } else if (st.isFile) {
+          if (isDbCandidate(rp)) out.add(rp);
+        }
+      } catch {
+        // root missing => ignore
+      }
     }
 
-    schedule();
+    return out;
+  };
 
-    // Fast path: keep accumulating until debounce fires.
-    if (timer !== undefined) continue;
+  const diffSets = (
+    prev: ReadonlySet<string>,
+    next: ReadonlySet<string>,
+  ): { added: string[]; removed: string[] } => {
+    const added: string[] = [];
+    const removed: string[] = [];
 
-    // Debounce completed; process batch.
-    pending = false;
+    for (const p of next) if (!prev.has(p)) added.push(p);
+    for (const p of prev) if (!next.has(p)) removed.push(p);
 
-    // If any removals happened, kill matches.
-    if (removed.size > 0 && Deno.build.os === "linux") {
+    return { added, removed };
+  };
+
+  // Snapshot of what we believe exists. This is the ONLY thing that triggers reconcile.
+  let snapshot = await listDbCandidates(rootsToWatch);
+
+  // One in-flight next() promise (avoid re-entrant iterator issues)
+  let nextP = it.next();
+
+  while (true) {
+    // Wait for first event
+    const first = await nextP;
+    if (first.done) break;
+
+    // Debounce: keep consuming events until quiet for debounceMs
+    while (true) {
+      const timeoutP = new Promise<"timeout">((r) =>
+        setTimeout(() => r("timeout"), debounceMs)
+      );
+
+      nextP = it.next();
+
+      const raced = await Promise.race([
+        nextP.then((r) => ({ kind: "next" as const, r })),
+        timeoutP.then(() => ({ kind: "timeout" as const })),
+      ]);
+
+      if (raced.kind === "timeout") break;
+
+      if (raced.r.done) return;
+      // Do nothing with event details; they are just wake-ups.
+      // We will re-scan and diff after the debounce window.
+    }
+
+    // After debounce, compute actual set and diff
+    const current = await listDbCandidates(rootsToWatch);
+    const { added, removed } = diffSets(snapshot, current);
+
+    // If no structural change in DB set, do NOTHING (this stops the “refresh loop”)
+    if (added.length === 0 && removed.length === 0) {
+      snapshot = current;
+      continue;
+    }
+
+    // Kill removed DB-backed processes (Linux only)
+    if (removed.length > 0 && Deno.build.os === "linux") {
       const taggedByProv = await buildTaggedByProvenance();
-
       for (const p of removed) {
-        // Kill by provenance key; optionally scope by sessionId.
         await killByRemovedPath(p, {
           strictKillsOnly,
           sessionId,
@@ -372,22 +435,16 @@ export async function* materializeWatch(
       }
     }
 
-    // Always rerun one-shot reconcile spawn (smartSpawn makes it safe/idempotent)
+    // Reconcile spawn only when DB set changed
     const res = await materializeOnce(
       src,
       { ...opts, smartSpawn: opts.smartSpawn ?? true },
       { sessionHome: session.sessionHome, rootsAbs, sessionId },
     );
 
-    // Reset batch state
-    touched.clear();
-    removed.clear();
-
+    snapshot = current;
     yield res;
   }
-
-  // Should not normally exit unless watcher closes.
-  await waitForDebounce();
 }
 
 /* -------------------------------- spawned ledger scan ------------------------------- */
