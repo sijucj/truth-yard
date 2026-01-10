@@ -138,6 +138,16 @@ button {
   width: 1%;
 }
 
+/* icon-only links (STDOUT / STDERR) */
+a.icon-link {
+  text-decoration: none;
+}
+
+a.icon-link:hover,
+a.icon-link:focus {
+  text-decoration: none;
+}
+
 .hidden {
   display: none;
 }
