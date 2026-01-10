@@ -161,11 +161,6 @@ function makeProxiedUrl(upstreamUrl: string, rest: string, reqUrl?: string) {
   return proxied.toString();
 }
 
-/*
-Fix for issue #11:
-If the browser navigates to an absolute path like "/foo" from inside a proxied page,
-the request loses the basePath prefix. We infer the basePath from Referer and retry.
-*/
 function inferBasePathFromReferer(c: Context, routes: ProxyRoute[]) {
   const ref = c.req.header("referer");
   if (!ref) return null;
@@ -395,16 +390,22 @@ export function registerCatchAllProxy(deps: ProxyDeps) {
     const { table } = buildProxyTableWithConflicts(processes);
 
     const reqPath = c.req.path;
-    let resolved = resolveProxyPath(reqPath, table);
+    const resolved = resolveProxyPath(reqPath, table);
 
-    // Issue #11 fix: retry using Referer-derived basePath if the current path has no mapping.
+    // Issue #11 fix: if the request lost its basePath, redirect browser to the corrected prefixed URL
     if (!resolved) {
       const inferredBase = inferBasePathFromReferer(c, table);
-      if (
-        inferredBase && !reqPath.startsWith(inferredBase + "/") &&
-        reqPath !== inferredBase
-      ) {
-        resolved = resolveProxyPath(inferredBase + reqPath, table);
+      if (inferredBase) {
+        // Avoid redirect loops and nonsense joins
+        if (
+          reqPath === inferredBase || reqPath.startsWith(inferredBase + "/")
+        ) {
+          // already prefixed, so don't redirect
+        } else if (reqPath.startsWith("/")) {
+          const corrected = new URL(c.req.url);
+          corrected.pathname = inferredBase + reqPath; // reqPath already starts with "/"
+          return c.redirect(corrected.toString(), 307);
+        }
       }
     }
 
