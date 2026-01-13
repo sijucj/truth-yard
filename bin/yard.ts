@@ -168,6 +168,175 @@ async function psReconcile(
   }
 }
 
+const YARD_VERSION = "dev";
+
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+/**
+ * Simplified HTML generator for `ps --html`.
+ * - Only supports the non-reconcile path (lsProcesses/taggedProcesses).
+ * - Proxy prefix is derived from the first path segment of the Upstream URL.
+ * - PID is at the end of the row.
+ * - Minimal "Process" expander for any extra fields we can discover.
+ */
+export async function htmlFromLsProcesses(): Promise<void> {
+  const rows: string[] = [];
+  let count = 0;
+
+  for await (const p of taggedProcesses()) {
+    count++;
+
+    const pid = (typeof p.pid === "number") ? p.pid : undefined;
+    const alive = true;
+
+    // Proxy prefix = first path segment of upstream URL (no host/port)
+    const proxyPrefix = p.proxyEndpointPrefix ?? "?";
+    const proxyHref = p.proxyEndpointPrefix ?? "#";
+    const upstreamHref = p.upstreamUrl ?? "#";
+    const upstreamLabel = p.upstreamUrl ?? "?";
+
+    const serviceName = p.serviceId;
+    const statusEmoji = alive === true ? "🟢" : alive === false ? "🔴" : "⚪";
+
+    // Minimal expandable debug; only show extra fields if present and only when extended
+    let detailsHtml = "";
+    const extras = [
+      ["cmdline", p.cmdline],
+      ["kind", p.kind],
+      [
+        "contextPath",
+        p.contextPath,
+      ],
+      ["label", p.label],
+      [
+        "env",
+        JSON.stringify(
+          Object.entries(p.env).filter(([k]) => k.startsWith("TRUTH_YARD")),
+        ),
+      ],
+    ].filter(([, v]) =>
+      v !== undefined && v !== null && String(v).trim() !== ""
+    );
+
+    if (extras.length > 0) {
+      detailsHtml = `
+<details>
+  <summary>⚙️ Process</summary>
+  <ul>
+    ${
+        extras
+          .map(([k, v]) =>
+            `<li><strong>${escapeHtml(k ?? "")}</strong>: <code>${
+              escapeHtml(String(v))
+            }</code></li>`
+          )
+          .join("\n")
+      }
+  </ul>
+</details>`.trim();
+    } else {
+      detailsHtml = `<span class="secondary">—</span>`;
+    }
+
+    const proxyCell = proxyPrefix
+      ? `<a href="${proxyHref}">${escapeHtml(proxyPrefix)}</a>`
+      : `<span class="secondary">—</span>`;
+
+    const upstreamCell = upstreamHref
+      ? `<a href="${escapeHtml(upstreamHref)}">${escapeHtml(upstreamLabel)}</a>`
+      : (upstreamLabel
+        ? `<code>${escapeHtml(upstreamLabel)}</code>`
+        : `<span class="secondary">—</span>`);
+
+    const pidCell = pid
+      ? `<code>${escapeHtml(String(pid))}</code> ${statusEmoji}`
+      : `<span class="secondary">—</span>`;
+
+    rows.push(`
+<tr>
+  <td>🧩 ${escapeHtml(serviceName)}</td>
+  <td>${proxyCell}</td>
+  <td>${upstreamCell}</td>
+  <td>${detailsHtml}</td>
+  <td>${pidCell}</td>
+</tr>`.trim());
+  }
+
+  rows.sort((a, b) => a.localeCompare(b));
+
+  const generatedAt = new Date().toISOString();
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Operational Truth Yard Services</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+  <style>
+    :root { --pico-font-size: 16px; }
+    header { margin-top: 1.5rem; }
+    .secondary { opacity: 0.7; }
+    code { font-size: 0.9em; }
+    details summary { cursor: pointer; }
+    footer { margin-top: 2.5rem; opacity: 0.8; }
+    td:last-child { text-align: right; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>
+        <img src="https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/heads/main/support/oty-logo-189x72.png"> 
+        Operational Truth Yard Services
+      </h1>
+      <p class="secondary">${count} service${
+    count === 1 ? "" : "s"
+  } discovered</p>
+    </header>
+
+    <section>
+      <figure>
+        <table role="grid">
+          <thead>
+            <tr>
+              <th scope="col">Service</th>
+              <th scope="col">🧭 Proxy</th>
+              <th scope="col">🔗 Upstream</th>
+              <th scope="col">🛠️ Process</th>
+              <th scope="col">PID</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+    rows.length
+      ? rows.join("\n")
+      : `<tr><td colspan="5" class="secondary">No services found.</td></tr>`
+  }
+          </tbody>
+        </table>
+      </figure>
+    </section>
+
+    <footer>
+      <small>Generated ${escapeHtml(generatedAt)} · yard version ${
+    escapeHtml(YARD_VERSION)
+  }</small>
+    </footer>
+  </main>
+</body>
+</html>`;
+
+  console.log(html);
+}
+
 const verboseType = new EnumType(["essential", "comprehensive"] as const);
 const proxyType = new EnumType(["nginx", "traefik", "both"] as const);
 const dialectType = new EnumType(["SQLite", "DuckDB"] as const);
@@ -444,7 +613,16 @@ await new Command()
     `Spawn state home OR a specific sessionHome (default ${defaultLedgerHome})`,
     { default: defaultLedgerHome },
   )
+  .option("--html", "Emit a static HTML index page to STDOUT")
   .action(async (options) => {
+    if (options.html) {
+      if (options.reconcile) {
+        throw new Error("ps --html cannot be used with --reconcile");
+      }
+      await htmlFromLsProcesses();
+      return;
+    }
+
     if (options.reconcile) {
       await psReconcile(options.ledgerHome);
     } else {
