@@ -727,14 +727,14 @@ export type TaggedProcess = Readonly<{
 
 /**
  * Linux-only: yield all processes "owned" by Truth Yard using env tags:
- * - DB_YARD_PROVENANCE
- * - DB_YARD_CONTEXT_PATH
- * - DB_YARD_SESSION_ID
- * - DB_YARD_SERVICE_ID
- * - DB_YARD_KIND
- * - DB_YARD_LABEL
- * - DB_YARD_PROXY_ENDPOINT_PREFIX
- * - DB_YARD_UPSTREAM_URL
+ * - TRUTH_YARD_PROVENANCE
+ * - TRUTH_YARD_CONTEXT_PATH
+ * - TRUTH_YARD_SESSION_ID
+ * - TRUTH_YARD_SERVICE_ID
+ * - TRUTH_YARD_KIND
+ * - TRUTH_YARD_LABEL
+ * - TRUTH_YARD_PROXY_ENDPOINT_PREFIX
+ * - TRUTH_YARD_UPSTREAM_URL
  *
  * Notes:
  * - Requires permission to read /proc/<pid>/environ for target processes.
@@ -770,22 +770,22 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
       continue;
     }
 
-    const envProvenance = env["DB_YARD_PROVENANCE"];
+    const envProvenance = env["TRUTH_YARD_PROVENANCE"];
     if (typeof envProvenance !== "string" || envProvenance.length === 0) {
       continue;
     }
 
-    const envContextPath = env["DB_YARD_CONTEXT_PATH"];
+    const envContextPath = env["TRUTH_YARD_CONTEXT_PATH"];
     if (typeof envContextPath !== "string" || envContextPath.length === 0) {
       continue;
     }
 
-    const sessionId = env["DB_YARD_SESSION_ID"];
+    const sessionId = env["TRUTH_YARD_SESSION_ID"];
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       continue;
     }
 
-    const serviceId = env["DB_YARD_SERVICE_ID"];
+    const serviceId = env["TRUTH_YARD_SERVICE_ID"];
     if (typeof serviceId !== "string" || serviceId.length === 0) {
       continue;
     }
@@ -811,18 +811,18 @@ export async function* taggedProcesses(): AsyncGenerator<TaggedProcess> {
       context = undefined;
     }
 
-    const kind = typeof env["DB_YARD_KIND"] === "string"
-      ? env["DB_YARD_KIND"]
+    const kind = typeof env["TRUTH_YARD_KIND"] === "string"
+      ? env["TRUTH_YARD_KIND"]
       : undefined;
-    const label = typeof env["DB_YARD_LABEL"] === "string"
-      ? env["DB_YARD_LABEL"]
+    const label = typeof env["TRUTH_YARD_LABEL"] === "string"
+      ? env["TRUTH_YARD_LABEL"]
       : undefined;
     const proxyEndpointPrefix =
-      typeof env["DB_YARD_PROXY_ENDPOINT_PREFIX"] === "string"
-        ? env["DB_YARD_PROXY_ENDPOINT_PREFIX"]
+      typeof env["TRUTH_YARD_PROXY_ENDPOINT_PREFIX"] === "string"
+        ? env["TRUTH_YARD_PROXY_ENDPOINT_PREFIX"]
         : undefined;
-    const upstreamUrl = typeof env["DB_YARD_UPSTREAM_URL"] === "string"
-      ? env["DB_YARD_UPSTREAM_URL"]
+    const upstreamUrl = typeof env["TRUTH_YARD_UPSTREAM_URL"] === "string"
+      ? env["TRUTH_YARD_UPSTREAM_URL"]
       : undefined;
 
     // Validate pid consistency: /proc/<pid> vs context.spawned.pid

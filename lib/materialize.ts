@@ -127,7 +127,7 @@ function onEventForVerbose(
 }
 
 function normalizeProvenanceKey(p: string): string {
-  // taggedProcesses() emits real paths in DB_YARD_PROVENANCE; normalize to resolve() for stable compare.
+  // taggedProcesses() emits real paths in TRUTH_YARD_PROVENANCE; normalize to resolve() for stable compare.
   return resolve(String(p ?? ""));
 }
 

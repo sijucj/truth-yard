@@ -5,7 +5,7 @@
 # HTTPS + CNAME (example eg.surveilr.com):
 # - DNS: create a CNAME eg.surveilr.com -> your public host name (or A/AAAA to server IP).
 # - TLS: terminate HTTPS at the edge with a reverse proxy (Caddy / NGINX / Traefik).
-# - Proxy: forward 443 -> container HTTP port (DB_YARD_WEB_UI_PORT, default 8787).
+# - Proxy: forward 443 -> container HTTP port (TRUTH_YARD_WEB_UI_PORT, default 8787).
 # - Run container HTTP-only; let the proxy manage certificates.
 #
 # Example run (explicit publish, since EXPOSE is omitted intentionally):
@@ -14,8 +14,8 @@
 #     -v $(pwd)/cargo.d:/work/cargo.d \
 #     your-image:tag
 #
-# If you change DB_YARD_WEB_UI_PORT at runtime, publish that port explicitly:
-#   docker run --rm -e DB_YARD_WEB_UI_PORT=8788 -p 8788:8788 ...
+# If you change TRUTH_YARD_WEB_UI_PORT at runtime, publish that port explicitly:
+#   docker run --rm -e TRUTH_YARD_WEB_UI_PORT=8788 -p 8788:8788 ...
 
 FROM debian:bookworm-slim
 
@@ -25,10 +25,10 @@ ENV DENO_INSTALL=/opt/deno
 ENV PATH=/opt/deno/bin:${PATH}
 
 # ---- truth-yard defaults --------------------------------------------------------
-ENV DB_YARD_VERSION=v0.6.0
-ENV DB_YARD_WEB_UI_PORT=8787
-ENV DB_YARD_BIN=https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/tags/${DB_YARD_VERSION}/bin/yard.ts
-ENV DB_YARD_WEB_UI_BIN=https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/tags/${DB_YARD_VERSION}/bin/web-ui/serve.ts
+ENV TRUTH_YARD_VERSION=v0.6.0
+ENV TRUTH_YARD_WEB_UI_PORT=8787
+ENV TRUTH_YARD_BIN=https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/tags/${TRUTH_YARD_VERSION}/bin/yard.ts
+ENV TRUTH_YARD_WEB_UI_BIN=https://raw.githubusercontent.com/netspective-labs/truth-yard/refs/tags/${TRUTH_YARD_VERSION}/bin/web-ui/serve.ts
 
 # ---- Base deps ---------------------------------------------------------------
 RUN apt-get update \
@@ -68,13 +68,13 @@ RUN cat > /usr/local/bin/truth-yard-entrypoint.sh <<'EOF' \
 set -eu
 
 # Start truth-yard (background) directly from tagged URL
-deno run -A "${DB_YARD_BIN}" start &
+deno run -A "${TRUTH_YARD_BIN}" start &
 
 # Allow initialization time
 sleep 5
 
 # Start web UI (foreground) directly from tagged URL
-exec deno run -A "${DB_YARD_WEB_UI_BIN}" --port "${DB_YARD_WEB_UI_PORT}"
+exec deno run -A "${TRUTH_YARD_WEB_UI_BIN}" --port "${TRUTH_YARD_WEB_UI_PORT}"
 EOF
  && chmod +x /usr/local/bin/truth-yard-entrypoint.sh
 

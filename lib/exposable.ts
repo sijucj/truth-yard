@@ -353,23 +353,25 @@ function processTagsEnv(init: ExposableInit): Record<string, string> {
   const t = init.processTags;
   if (!t) return {};
   return {
-    DB_YARD_PROVENANCE: resolve(t.provenance),
-    DB_YARD_CONTEXT_PATH: t.contextPath,
-    DB_YARD_SESSION_ID: t.sessionId,
-    DB_YARD_SERVICE_ID: t.serviceId,
+    TRUTH_YARD_PROVENANCE: resolve(t.provenance),
+    TRUTH_YARD_CONTEXT_PATH: t.contextPath,
+    TRUTH_YARD_SESSION_ID: t.sessionId,
+    TRUTH_YARD_SERVICE_ID: t.serviceId,
 
-    DB_YARD_KIND: t.kind,
-    DB_YARD_LABEL: t.label,
-    DB_YARD_PROXY_ENDPOINT_PREFIX: t.proxyEndpointPrefix,
-    DB_YARD_UPSTREAM_URL: t.upstreamUrl,
+    TRUTH_YARD_KIND: t.kind,
+    TRUTH_YARD_LABEL: t.label,
+    TRUTH_YARD_PROXY_ENDPOINT_PREFIX: t.proxyEndpointPrefix,
+    TRUTH_YARD_UPSTREAM_URL: t.upstreamUrl,
 
     ...(typeof t.listenHost === "string"
-      ? { DB_YARD_LISTEN_HOST: t.listenHost }
+      ? { TRUTH_YARD_LISTEN_HOST: t.listenHost }
       : {}),
-    ...(typeof t.port === "number" ? { DB_YARD_PORT: String(t.port) } : {}),
-    ...(typeof t.baseUrl === "string" ? { DB_YARD_BASE_URL: t.baseUrl } : {}),
+    ...(typeof t.port === "number" ? { TRUTH_YARD_PORT: String(t.port) } : {}),
+    ...(typeof t.baseUrl === "string"
+      ? { TRUTH_YARD_BASE_URL: t.baseUrl }
+      : {}),
     ...(typeof t.probeUrl === "string"
-      ? { DB_YARD_PROBE_URL: t.probeUrl }
+      ? { TRUTH_YARD_PROBE_URL: t.probeUrl }
       : {}),
   };
 }
