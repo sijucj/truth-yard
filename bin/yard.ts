@@ -216,6 +216,11 @@ await new Command()
     `Spawn state home (default ${defaultLedgerHome})`,
     { default: defaultLedgerHome },
   )
+  .option(
+    "--listen-host <host:string>",
+    "Listent host for spawned services (default 127.0.0.1)",
+    { default: "127.0.0.1" },
+  )
   .option("--verbose <level:verbose>", "Spawn/materialize verbosity")
   .option("--summarize", "Summarize after spawning")
   .option("--no-ls", "Don't list after spawning")
@@ -242,11 +247,13 @@ await new Command()
         watch,
         watchDebounceMs,
         watchStrictKillsOnly,
+        listenHost,
       },
     ) => {
       const optsBase = {
         verbose: verbose ? verbose : false,
         spawnedLedgerHome: ledgerHome,
+        listenHost,
       } as const;
 
       if (watch) {

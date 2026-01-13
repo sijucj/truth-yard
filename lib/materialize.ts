@@ -71,6 +71,11 @@ export type MaterializeOptions = Readonly<{
   spawnedLedgerHome: string;
 
   /**
+   * Service bind/listen host (default handled by spawn() when omitted).
+   */
+  listenHost?: string;
+
+  /**
    * If true (default), materialize will use taggedProcesses() (Linux-only)
    * to avoid spawning services that are already running.
    */
@@ -227,6 +232,7 @@ async function materializeOnce(
     onEvent,
     probe: { enabled: false },
     sessionId: args.sessionId,
+    listenHost: opts.listenHost,
   });
 
   while (true) {
